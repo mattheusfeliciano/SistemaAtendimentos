@@ -95,6 +95,14 @@ const attachmentAllowedExtensions = new Set([
   '.png',
   '.webp',
 ]);
+const securityAuditActions = new Set([
+  'LOGIN_FAILED_UNKNOWN',
+  'LOGIN_FAILED',
+  'LOGIN_BLOCKED',
+  'UNLOCK_USER',
+  'DEACTIVATE_USER',
+  'SESSION_IDLE_EXPIRED',
+]);
 const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_HEADER_NAME = 'x-csrf-guard';
 const CSRF_HEADER_VALUE = '1';
@@ -176,6 +184,10 @@ function normalizeComparable(value) {
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeRoleValue(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function maskEmail(value) {
@@ -500,6 +512,7 @@ function sanitizeUserForViewer(viewer, targetUser) {
   const isViewerRoot = isRootAdmin(viewer);
   const sanitized = {
     ...targetUser,
+    role: normalizeRoleValue(targetUser.role),
     approvedBy: isViewerRoot ? targetUser.approvedBy : null,
     approvedByName: isViewerRoot ? targetUser.approvedByName : null,
   };
@@ -1022,6 +1035,7 @@ async function authenticate(req, res, next) {
     }
 
     const session = result.rows[0];
+    session.role = normalizeRoleValue(session.role);
     const lastActivityAtMs = session.lastActivityAt ? new Date(session.lastActivityAt).getTime() : Date.now();
     const idleTimeoutMs = SESSION_IDLE_MINUTES * 60 * 1000;
     const idleForMs = Date.now() - lastActivityAtMs;
@@ -1201,6 +1215,168 @@ app.get('/api/ops/metrics', authenticate, requirePermission('ops:read'), async (
   });
 });
 
+app.get('/api/audit-logs', authenticate, requirePermission('ops:read'), async (req, res) => {
+  const action = sanitize(req.query?.action || '').toUpperCase();
+  const entity = sanitize(req.query?.entity || '').toLowerCase();
+  const userId = sanitize(req.query?.userId || '');
+  const dateFrom = sanitize(req.query?.dateFrom || '');
+  const dateTo = sanitize(req.query?.dateTo || '');
+  const securityOnly = String(req.query?.securityOnly || '').toLowerCase() === 'true';
+  const page = Math.max(1, Number(req.query?.page || 1));
+  const limit = Math.min(500, Math.max(1, Number(req.query?.limit || 100)));
+  const offset = (page - 1) * limit;
+
+  try {
+    const where = [];
+    const params = [];
+    if (action) {
+      params.push(action);
+      where.push(`l.action = $${params.length}`);
+    }
+    if (entity) {
+      params.push(entity);
+      where.push(`l.entity = $${params.length}`);
+    }
+    if (userId) {
+      params.push(userId);
+      where.push(`l.user_id::text = $${params.length}`);
+    }
+    if (dateFrom && isValidIsoDate(dateFrom)) {
+      params.push(`${dateFrom}T00:00:00.000Z`);
+      where.push(`l.created_at >= $${params.length}::timestamptz`);
+    }
+    if (dateTo && isValidIsoDate(dateTo)) {
+      params.push(`${dateTo}T23:59:59.999Z`);
+      where.push(`l.created_at <= $${params.length}::timestamptz`);
+    }
+    if (securityOnly) {
+      params.push(Array.from(securityAuditActions));
+      where.push(`l.action = ANY($${params.length}::text[])`);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const countResult = await query(`SELECT COUNT(*)::int AS total FROM audit_logs l ${whereClause}`, params);
+
+    const pagedParams = [...params, limit, offset];
+    const dataResult = await query(
+      `
+        SELECT
+          l.id::text AS id,
+          l.user_id::text AS "userId",
+          COALESCE(u.full_name, 'Sistema') AS "userName",
+          l.action,
+          l.entity,
+          l.entity_id AS "entityId",
+          l.ip_address AS "ipAddress",
+          l.details,
+          l.created_at AS "createdAt"
+        FROM audit_logs l
+        LEFT JOIN users u ON u.id = l.user_id
+        ${whereClause}
+        ORDER BY l.created_at DESC
+        LIMIT $${pagedParams.length - 1}
+        OFFSET $${pagedParams.length}
+      `,
+      pagedParams
+    );
+
+    return res.json({
+      data: dataResult.rows,
+      pagination: {
+        page,
+        limit,
+        total: countResult.rows[0]?.total || 0,
+      },
+    });
+  } catch (error) {
+    console.error('Erro ao buscar logs de auditoria:', error);
+    return res.status(500).json({ error: 'Erro interno no servidor.' });
+  }
+});
+
+app.get('/api/audit-logs/export.csv', authenticate, requirePermission('ops:read'), async (req, res) => {
+  const action = sanitize(req.query?.action || '').toUpperCase();
+  const entity = sanitize(req.query?.entity || '').toLowerCase();
+  const userId = sanitize(req.query?.userId || '');
+  const dateFrom = sanitize(req.query?.dateFrom || '');
+  const dateTo = sanitize(req.query?.dateTo || '');
+  const securityOnly = String(req.query?.securityOnly || '').toLowerCase() === 'true';
+  const limit = Math.min(5000, Math.max(1, Number(req.query?.limit || 2000)));
+
+  try {
+    const where = [];
+    const params = [];
+    if (action) {
+      params.push(action);
+      where.push(`l.action = $${params.length}`);
+    }
+    if (entity) {
+      params.push(entity);
+      where.push(`l.entity = $${params.length}`);
+    }
+    if (userId) {
+      params.push(userId);
+      where.push(`l.user_id::text = $${params.length}`);
+    }
+    if (dateFrom && isValidIsoDate(dateFrom)) {
+      params.push(`${dateFrom}T00:00:00.000Z`);
+      where.push(`l.created_at >= $${params.length}::timestamptz`);
+    }
+    if (dateTo && isValidIsoDate(dateTo)) {
+      params.push(`${dateTo}T23:59:59.999Z`);
+      where.push(`l.created_at <= $${params.length}::timestamptz`);
+    }
+    if (securityOnly) {
+      params.push(Array.from(securityAuditActions));
+      where.push(`l.action = ANY($${params.length}::text[])`);
+    }
+    params.push(limit);
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const result = await query(
+      `
+        SELECT
+          l.created_at AS "createdAt",
+          COALESCE(u.full_name, 'Sistema') AS "userName",
+          l.user_id::text AS "userId",
+          l.action,
+          l.entity,
+          l.entity_id AS "entityId",
+          l.ip_address AS "ipAddress",
+          COALESCE(l.details::text, '') AS details
+        FROM audit_logs l
+        LEFT JOIN users u ON u.id = l.user_id
+        ${whereClause}
+        ORDER BY l.created_at DESC
+        LIMIT $${params.length}
+      `,
+      params
+    );
+
+    const header = ['createdAt', 'userName', 'userId', 'action', 'entity', 'entityId', 'ipAddress', 'details'];
+    const lines = [header.join(',')];
+    result.rows.forEach((row) => {
+      lines.push([
+        toCsvCell(row.createdAt),
+        toCsvCell(row.userName),
+        toCsvCell(row.userId),
+        toCsvCell(row.action),
+        toCsvCell(row.entity),
+        toCsvCell(row.entityId),
+        toCsvCell(row.ipAddress),
+        toCsvCell(row.details),
+      ].join(','));
+    });
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${new Date().toISOString().slice(0, 10)}.csv"`);
+    return res.status(200).send(`\uFEFF${lines.join('\n')}`);
+  } catch (error) {
+    console.error('Erro ao exportar logs de auditoria:', error);
+    return res.status(500).json({ error: 'Erro interno no servidor.' });
+  }
+});
+
 app.post('/api/auth/register', async (req, res) => {
   const fullName = sanitize(req.body?.fullName || '');
   const email = sanitize(req.body?.email || '').toLowerCase();
@@ -1316,6 +1492,7 @@ app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginP
     }
 
     const user = result.rows[0];
+    user.role = normalizeRoleValue(user.role);
     const now = Date.now();
     if (user.lockedUntil && new Date(user.lockedUntil).getTime() > now) {
       const retryAfterSec = Math.ceil((new Date(user.lockedUntil).getTime() - now) / 1000);
@@ -1327,6 +1504,12 @@ app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginP
         entity: 'auth',
         entityId: user.id,
         details: { lockedUntil: user.lockedUntil },
+      });
+      await createSecurityAlert({
+        title: 'Conta bloqueada por tentativas inválidas',
+        message: `Usuário ${user.fullName} (${maskEmail(user.email)}) tentou autenticar durante bloqueio ativo.`,
+        relatedEntity: 'user',
+        relatedId: user.id,
       });
       return res.status(423).json({ error: 'Conta temporariamente bloqueada por tentativas inválidas. Tente novamente mais tarde.' });
     }
@@ -1365,6 +1548,14 @@ app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginP
         entityId: user.id,
         details: { failedLoginAttempts: failed.failedLoginAttempts, lockedUntil: failed.lockedUntil },
       });
+      if (failed.failedLoginAttempts >= 3) {
+        await createSecurityAlert({
+          title: 'Múltiplos logins falhos detectados',
+          message: `Usuário ${user.fullName} (${maskEmail(user.email)}) acumulou ${failed.failedLoginAttempts} tentativas de login falhas.`,
+          relatedEntity: 'user',
+          relatedId: user.id,
+        });
+      }
       if (failed.lockedUntil && new Date(failed.lockedUntil).getTime() > Date.now()) {
         return res.status(423).json({ error: 'Conta temporariamente bloqueada por tentativas inválidas. Tente novamente mais tarde.' });
       }
@@ -1729,6 +1920,12 @@ app.patch('/api/users/:id/deactivate', authenticate, requirePermission('users:de
     await query('UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [req.params.id]);
 
     await auditLog({ req, userId: req.user.id, action: 'DEACTIVATE_USER', entity: 'user', entityId: req.params.id });
+    await createSecurityAlert({
+      title: 'Usuário desativado',
+      message: `${req.user.fullName} desativou o usuário ${result.rows[0].fullName}.`,
+      relatedEntity: 'user',
+      relatedId: req.params.id,
+    });
     return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao desativar usuário:', error);
@@ -1814,6 +2011,12 @@ app.patch('/api/users/:id/unlock', authenticate, requirePermission('users:activa
     if (result.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
 
     await auditLog({ req, userId: req.user.id, action: 'UNLOCK_USER', entity: 'user', entityId: req.params.id });
+    await createSecurityAlert({
+      title: 'Desbloqueio manual de conta',
+      message: `${req.user.fullName} desbloqueou manualmente o usuário ${result.rows[0].fullName}.`,
+      relatedEntity: 'user',
+      relatedId: req.params.id,
+    });
     return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao desbloquear usuário:', error);

@@ -95,10 +95,16 @@ export async function initDatabase() {
     UPDATE users
     SET
       full_name = COALESCE(NULLIF(full_name, ''), name),
-      role = COALESCE(NULLIF(role, ''), 'operador'),
+      role = LOWER(COALESCE(NULLIF(TRIM(role), ''), 'operador')),
       department = COALESCE(department, ''),
       failed_login_attempts = COALESCE(failed_login_attempts, 0)
     WHERE full_name IS NULL OR full_name = '' OR role IS NULL OR role = '' OR department IS NULL OR failed_login_attempts IS NULL;
+  `);
+
+  await query(`
+    UPDATE users
+    SET role = LOWER(TRIM(role))
+    WHERE role IS NOT NULL AND role <> LOWER(TRIM(role));
   `);
 
   await query(`

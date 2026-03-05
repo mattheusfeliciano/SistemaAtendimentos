@@ -15,6 +15,11 @@ function resolveApiUrl(url: string): string {
   return `${API_BASE_URL}${raw}`;
 }
 
+function normalizeRole<T extends { role?: string }>(item: T): T {
+  if (!item || typeof item.role !== 'string') return item;
+  return { ...item, role: item.role.trim().toLowerCase() } as T;
+}
+
 export class ApiError extends Error {
   status: number;
   code?: string;
@@ -197,6 +202,27 @@ export interface NotificationItem {
   createdAt: string;
 }
 
+export interface AuditLogItem {
+  id: string;
+  userId?: string | null;
+  userName: string;
+  action: string;
+  entity: string;
+  entityId?: string | null;
+  ipAddress?: string | null;
+  details?: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface AuditLogListResponse {
+  data: AuditLogItem[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+  };
+}
+
 export interface SecretaryMetrics {
   summary: {
     total: number;
@@ -311,7 +337,7 @@ export const authService = {
   async me(): Promise<AuthUser> {
     const response = await fetch(`${API_BASE_URL}/api/auth/me`, defaultFetchOptions);
     const data = await handleResponse<{ user: AuthUser }>(response);
-    return data.user;
+    return normalizeRole(data.user);
   },
 
   async login(email: string, password: string, termsAccepted: boolean, privacyAccepted: boolean): Promise<AuthUser> {
@@ -325,7 +351,7 @@ export const authService = {
       body: JSON.stringify({ email, password, termsAccepted, privacyAccepted }),
     });
     const data = await handleResponse<{ user: AuthUser }>(response);
-    return data.user;
+    return normalizeRole(data.user);
   },
 
   async register(payload: RegisterPayload): Promise<RegisterResponse> {
@@ -354,7 +380,8 @@ export const authService = {
 export const userAdminService = {
   async list(): Promise<AdminUser[]> {
     const response = await fetch(`${API_BASE_URL}/api/users`, defaultFetchOptions);
-    return handleResponse<AdminUser[]>(response);
+    const users = await handleResponse<AdminUser[]>(response);
+    return users.map((user) => normalizeRole(user));
   },
 
   async create(payload: CreateUserPayload): Promise<{ user: AdminUser; message: string }> {
@@ -367,7 +394,8 @@ export const userAdminService = {
       },
       body: JSON.stringify(payload),
     });
-    return handleResponse<{ user: AdminUser; message: string }>(response);
+    const result = await handleResponse<{ user: AdminUser; message: string }>(response);
+    return { ...result, user: normalizeRole(result.user) };
   },
 
   async approve(userId: string): Promise<AdminUser> {
@@ -376,7 +404,7 @@ export const userAdminService = {
       method: 'PATCH',
       headers: csrfGuardHeaders,
     });
-    return handleResponse<AdminUser>(response);
+    return normalizeRole(await handleResponse<AdminUser>(response));
   },
 
   async deactivate(userId: string): Promise<AdminUser> {
@@ -385,7 +413,7 @@ export const userAdminService = {
       method: 'PATCH',
       headers: csrfGuardHeaders,
     });
-    return handleResponse<AdminUser>(response);
+    return normalizeRole(await handleResponse<AdminUser>(response));
   },
 
   async activate(userId: string): Promise<AdminUser> {
@@ -394,7 +422,7 @@ export const userAdminService = {
       method: 'PATCH',
       headers: csrfGuardHeaders,
     });
-    return handleResponse<AdminUser>(response);
+    return normalizeRole(await handleResponse<AdminUser>(response));
   },
 
   async unlock(userId: string): Promise<AdminUser> {
@@ -403,7 +431,7 @@ export const userAdminService = {
       method: 'PATCH',
       headers: csrfGuardHeaders,
     });
-    return handleResponse<AdminUser>(response);
+    return normalizeRole(await handleResponse<AdminUser>(response));
   },
 
   async updateAccess(userId: string, payload: UpdateUserAccessPayload): Promise<AdminUser> {
@@ -416,7 +444,7 @@ export const userAdminService = {
       },
       body: JSON.stringify(payload),
     });
-    return handleResponse<AdminUser>(response);
+    return normalizeRole(await handleResponse<AdminUser>(response));
   },
 
   async update(userId: string, payload: UpdateUserPayload): Promise<AdminUser> {
@@ -429,7 +457,7 @@ export const userAdminService = {
       },
       body: JSON.stringify(payload),
     });
-    return handleResponse<AdminUser>(response);
+    return normalizeRole(await handleResponse<AdminUser>(response));
   },
 
   async remove(userId: string): Promise<void> {
@@ -786,5 +814,57 @@ export const notificationService = {
       headers: csrfGuardHeaders,
     });
     return handleResponse<{ id: string; readAt: string }>(response);
+  },
+};
+
+export const auditService = {
+  async list(filters: {
+    action?: string;
+    entity?: string;
+    userId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    securityOnly?: boolean;
+    page?: number;
+    limit?: number;
+  } = {}): Promise<AuditLogListResponse> {
+    const params = new URLSearchParams();
+    if (filters.action) params.set('action', filters.action);
+    if (filters.entity) params.set('entity', filters.entity);
+    if (filters.userId) params.set('userId', filters.userId);
+    if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+    if (filters.dateTo) params.set('dateTo', filters.dateTo);
+    if (filters.securityOnly) params.set('securityOnly', 'true');
+    if (filters.page) params.set('page', String(filters.page));
+    if (filters.limit) params.set('limit', String(filters.limit));
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const response = await fetch(`${API_BASE_URL}/api/audit-logs${query}`, defaultFetchOptions);
+    return handleResponse<AuditLogListResponse>(response);
+  },
+
+  async exportCsv(filters: {
+    action?: string;
+    entity?: string;
+    userId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    securityOnly?: boolean;
+    limit?: number;
+  } = {}): Promise<Blob> {
+    const params = new URLSearchParams();
+    if (filters.action) params.set('action', filters.action);
+    if (filters.entity) params.set('entity', filters.entity);
+    if (filters.userId) params.set('userId', filters.userId);
+    if (filters.dateFrom) params.set('dateFrom', filters.dateFrom);
+    if (filters.dateTo) params.set('dateTo', filters.dateTo);
+    if (filters.securityOnly) params.set('securityOnly', 'true');
+    if (filters.limit) params.set('limit', String(filters.limit));
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const response = await fetch(`${API_BASE_URL}/api/audit-logs/export.csv${query}`, defaultFetchOptions);
+    if (!response.ok) {
+      const payload = await parseResponseBody(response);
+      throw new ApiError(payload.error || `Erro HTTP ${response.status}`, response.status, payload.code);
+    }
+    return response.blob();
   },
 };

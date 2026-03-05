@@ -9,6 +9,8 @@ interface AdminUsersPanelProps {
   currentUserRole?: AuthUser['role'];
   currentUserId?: string;
   isSecretaryUser?: boolean;
+  focusUserId?: string | null;
+  onFocusHandled?: () => void;
 }
 
 const initialCreateForm: CreateUserPayload = {
@@ -53,7 +55,7 @@ function isUserLocked(user: AdminUser): boolean {
   return new Date(user.lockedUntil).getTime() > Date.now();
 }
 
-const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUserRole, currentUserId, isSecretaryUser = false }) => {
+const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUserRole, currentUserId, isSecretaryUser = false, focusUserId = null, onFocusHandled }) => {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingCreate, setSavingCreate] = useState(false);
@@ -115,6 +117,16 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
   useEffect(() => {
     if (isGestor) setCreateForm((prev) => ({ ...prev, role: 'operador' }));
   }, [isGestor]);
+
+  useEffect(() => {
+    if (!focusUserId) return;
+    const target = users.find((u) => u.id === focusUserId);
+    if (!target) return;
+    setSearch(target.email);
+    openEditModal(target);
+    setInfo(`Usuário ${target.fullName} aberto a partir da auditoria.`);
+    onFocusHandled?.();
+  }, [focusUserId, users]);
 
   const canManageUser = (user: AdminUser): boolean => {
     if (isSuperAdmin) return true;

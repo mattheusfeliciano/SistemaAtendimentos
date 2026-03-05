@@ -29,6 +29,7 @@ import AdminUsersPanel from './components/AdminUsersPanel';
 import CatalogOptionsPanel from './components/CatalogOptionsPanel';
 import TasksPanel from './components/TasksPanel';
 import SecretaryPanel from './components/SecretaryPanel';
+import AuditPanel from './components/AuditPanel';
 import SettingsScreen from './components/SettingsScreen';
 import AlertBanner from './components/ui/AlertBanner';
 import SidebarNavItem from './components/ui/SidebarNavItem';
@@ -39,7 +40,7 @@ const LIGHT_COLORS = ['#0F5132', '#1E8449', '#2ECC71', '#27AE60', '#16A085', '#1
 const DARK_COLORS = ['#2ECC71', '#48C9B0', '#52BE80', '#27AE60', '#A9DFBF', '#F4D03F'];
 const MULTI_VALUE_SEPARATOR = '|';
 const SECRETARY_DISPLAY_NAME = 'SECRETÁRIO';
-type AppTab = 'dashboard' | 'registrar' | 'historico' | 'usuarios' | 'padronizacao' | 'relatorios' | 'atividades' | 'equipe' | 'secretaria' | 'configuracoes';
+type AppTab = 'dashboard' | 'registrar' | 'historico' | 'usuarios' | 'padronizacao' | 'relatorios' | 'atividades' | 'equipe' | 'secretaria' | 'auditoria' | 'configuracoes';
 type GlobalSearchItemKind = 'atendimento' | 'atividade' | 'equipe' | 'usuario' | 'notificacao';
 type GlobalSearchItem = { id: string; kind: GlobalSearchItemKind; title: string; subtitle: string };
 const emptyAtendimentoDraft: Omit<Atendimento, 'id' | 'createdAt'> = {
@@ -65,6 +66,14 @@ function normalizeComparable(value: string): string {
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeRoleValue(value?: string | null): 'superadmin' | 'admin' | 'gestor' | 'operador' | '' {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'superadmin' || normalized === 'admin' || normalized === 'gestor' || normalized === 'operador') {
+    return normalized;
+  }
+  return '';
 }
 
 const App: React.FC = () => {
@@ -97,6 +106,7 @@ const App: React.FC = () => {
   const [registerWorkspace, setRegisterWorkspace] = useState<'' | 'atendimento' | 'departamento' | 'local' | 'atividade' | 'responsavel'>('');
   const [registerDraft, setRegisterDraft] = useState<Omit<Atendimento, 'id' | 'createdAt'>>(emptyAtendimentoDraft);
   const [globalSearchData, setGlobalSearchData] = useState<GlobalSearchItem[]>([]);
+  const [focusUserIdInAdmin, setFocusUserIdInAdmin] = useState<string | null>(null);
   const lastUnreadCountRef = useRef<number | null>(null);
   const notificationsPanelRef = useRef<HTMLDivElement | null>(null);
   const notificationsCloseTimerRef = useRef<number | undefined>(undefined);
@@ -138,7 +148,8 @@ const App: React.FC = () => {
         : undefined,
     [editingAtendimento]
   );
-  const canManageUsers = currentUser?.role === 'superadmin' || currentUser?.role === 'admin' || currentUser?.role === 'gestor';
+  const normalizedCurrentRole = normalizeRoleValue(currentUser?.role);
+  const canManageUsers = normalizedCurrentRole === 'superadmin' || normalizedCurrentRole === 'admin' || normalizedCurrentRole === 'gestor';
 
   const fetchData = useCallback(async () => {
     try {
@@ -269,11 +280,12 @@ const App: React.FC = () => {
   }, [globalSearchData, globalSearchQuery]);
 
   const canCreateAtendimento = !!currentUser;
-  const canDeleteAtendimento = currentUser?.role === 'superadmin' || currentUser?.role === 'admin' || currentUser?.role === 'gestor';
+  const canDeleteAtendimento = normalizedCurrentRole === 'superadmin' || normalizedCurrentRole === 'admin' || normalizedCurrentRole === 'gestor';
   const canEditAtendimento = !!currentUser;
   const canManageCatalog = !!currentUser;
   const isSecretaryUser = normalizeComparable(currentUser?.fullName || '') === normalizeComparable(SECRETARY_DISPLAY_NAME);
-  const canManageSecretary = !!currentUser && (isSecretaryUser || currentUser.role === 'superadmin' || currentUser.role === 'admin');
+  const canManageSecretary = !!currentUser && (isSecretaryUser || normalizedCurrentRole === 'superadmin' || normalizedCurrentRole === 'admin');
+  const canViewAudit = normalizedCurrentRole === 'superadmin';
   const currentRoleLabel =
     isSecretaryUser
       ? 'Secretário'
@@ -392,7 +404,10 @@ const App: React.FC = () => {
     if (activeTab === 'configuracoes' && !currentUser) {
       setActiveTab('dashboard');
     }
-  }, [activeTab, canManageUsers, canCreateAtendimento, canManageCatalog, canManageSecretary, currentUser]);
+    if (activeTab === 'auditoria' && !canViewAudit) {
+      setActiveTab('dashboard');
+    }
+  }, [activeTab, canManageUsers, canCreateAtendimento, canManageCatalog, canManageSecretary, canViewAudit, currentUser]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -919,6 +934,7 @@ const App: React.FC = () => {
     { key: 'equipe' as AppTab, label: 'Equipe', icon: FiUsers, visible: canManageSecretary },
     { key: 'secretaria' as AppTab, label: 'Painel da Secretaria', icon: FiCheckSquare, visible: canManageSecretary },
     { key: 'usuarios' as AppTab, label: 'Usuários', icon: FiUserCheck, visible: canManageUsers },
+    { key: 'auditoria' as AppTab, label: 'Auditoria', icon: FiSliders, visible: canViewAudit },
     { key: 'relatorios' as AppTab, label: 'Relatórios', icon: FiFileText, visible: !!currentUser },
     { key: 'configuracoes' as AppTab, label: 'Configurações', icon: FiSettings, visible: !!currentUser },
   ].filter((item) => item.visible);
@@ -1028,6 +1044,8 @@ const App: React.FC = () => {
                             ? 'Painel Geral da Secretaria'
                         : activeTab === 'usuarios'
                           ? 'Gestão de Usuários'
+                        : activeTab === 'auditoria'
+                          ? 'Auditoria e Alertas de Segurança'
                         : activeTab === 'padronizacao'
                             ? 'Padronização de Cadastros'
                             : activeTab === 'configuracoes'
@@ -1521,7 +1539,24 @@ const App: React.FC = () => {
           )}
 
           {activeTab === 'usuarios' && !isFullScreen && canManageUsers && (
-            <AdminUsersPanel darkMode={darkMode} currentUserRole={currentUser?.role} currentUserId={currentUser?.id} isSecretaryUser={isSecretaryUser} />
+            <AdminUsersPanel
+              darkMode={darkMode}
+              currentUserRole={(normalizedCurrentRole || undefined) as AuthUser['role'] | undefined}
+              currentUserId={currentUser?.id}
+              isSecretaryUser={isSecretaryUser}
+              focusUserId={focusUserIdInAdmin}
+              onFocusHandled={() => setFocusUserIdInAdmin(null)}
+            />
+          )}
+          {activeTab === 'auditoria' && !isFullScreen && canViewAudit && (
+            <AuditPanel
+              darkMode={darkMode}
+              onOpenUser={(userId) => {
+                if (!canManageUsers) return;
+                setFocusUserIdInAdmin(userId);
+                setActiveTab('usuarios');
+              }}
+            />
           )}
           {activeTab === 'configuracoes' && !isFullScreen && currentUser && (
             <SettingsScreen darkMode={darkMode} currentUser={currentUser} onToggleDarkMode={setDarkMode} />
