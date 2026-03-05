@@ -5,6 +5,8 @@ import { ApiError, authService } from '../services/api';
 const LoginPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [acceptPrivacy, setAcceptPrivacy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -27,7 +29,11 @@ const LoginPage: React.FC = () => {
     setLoading(true);
 
     try {
-      await authService.login(email, password);
+      if (!acceptTerms || !acceptPrivacy) {
+        setError('Você precisa aceitar os Termos de Uso e a Política de Privacidade para entrar.');
+        return;
+      }
+      await authService.login(email, password, acceptTerms, acceptPrivacy);
       navigate(from, { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.message.includes('pendente de aprovação')) {
@@ -91,6 +97,29 @@ const LoginPage: React.FC = () => {
                 className="w-full rounded-xl border border-[#b8dfc8] bg-[#f5fbf7] px-4 py-3 pl-10 outline-none focus:ring-2 focus:ring-[#1E8449]"
               />
             </div>
+          </div>
+
+          <div className="rounded-xl border border-[#c7e9d5] bg-[#f3fbf6] p-3 space-y-2">
+            <label className="flex items-start gap-2 text-xs font-semibold text-[#0F5132]">
+              <input type="checkbox" checked={acceptTerms} onChange={(e) => setAcceptTerms(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[#1E8449]" />
+              <span>
+                Li e aceito os{' '}
+                <Link to="/termos-de-uso" target="_blank" rel="noopener noreferrer" className="font-black text-[#1E8449] hover:underline">
+                  Termos de Uso
+                </Link>
+                .
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-xs font-semibold text-[#0F5132]">
+              <input type="checkbox" checked={acceptPrivacy} onChange={(e) => setAcceptPrivacy(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[#1E8449]" />
+              <span>
+                Li e aceito a{' '}
+                <Link to="/politica-de-privacidade" target="_blank" rel="noopener noreferrer" className="font-black text-[#1E8449] hover:underline">
+                  Política de Privacidade
+                </Link>
+                .
+              </span>
+            </label>
           </div>
 
           {error && <p className="text-sm font-semibold text-red-600">{error}</p>}

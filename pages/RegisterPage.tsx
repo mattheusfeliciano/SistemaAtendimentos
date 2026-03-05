@@ -24,6 +24,8 @@ const RegisterPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [acceptPrivacy, setAcceptPrivacy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -70,6 +72,10 @@ const RegisterPage: React.FC = () => {
       setError('Telefone inválido. Use DDD + número.');
       return;
     }
+    if (!acceptTerms || !acceptPrivacy) {
+      setError('É obrigatório aceitar os Termos de Uso e a Política de Privacidade.');
+      return;
+    }
 
     setLoading(true);
     try {
@@ -79,6 +85,8 @@ const RegisterPage: React.FC = () => {
         password,
         department,
         phone: phone || undefined,
+        termsAccepted: acceptTerms,
+        privacyAccepted: acceptPrivacy,
       });
       setSuccess(result.message || 'Cadastro bem-sucedido! Agora aguarde aprovação do gestor.');
       setTimeout(() => navigate('/login', { replace: true }), 1800);
@@ -216,6 +224,29 @@ const RegisterPage: React.FC = () => {
                 </li>
               ))}
             </ul>
+          </div>
+
+          <div className="rounded-2xl border border-[#c7e9d5] bg-[#f3fbf6] p-4 space-y-2">
+            <label className="flex items-start gap-2 text-xs font-semibold text-[#0F5132]">
+              <input type="checkbox" checked={acceptTerms} onChange={(e) => setAcceptTerms(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[#1E8449]" />
+              <span>
+                Li e aceito os{' '}
+                <Link to="/termos-de-uso" target="_blank" rel="noopener noreferrer" className="font-black text-[#1E8449] hover:underline">
+                  Termos de Uso
+                </Link>
+                .
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-xs font-semibold text-[#0F5132]">
+              <input type="checkbox" checked={acceptPrivacy} onChange={(e) => setAcceptPrivacy(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[#1E8449]" />
+              <span>
+                Li e aceito a{' '}
+                <Link to="/politica-de-privacidade" target="_blank" rel="noopener noreferrer" className="font-black text-[#1E8449] hover:underline">
+                  Política de Privacidade
+                </Link>
+                .
+              </span>
+            </label>
           </div>
 
           {error && <p className="text-sm font-semibold text-red-600">{error}</p>}

@@ -9,6 +9,7 @@ interface AtendimentoFormProps {
   darkMode?: boolean;
   initialData?: Omit<Atendimento, 'id' | 'createdAt'>;
   submitLabel?: string;
+  onDraftChange?: (data: Omit<Atendimento, 'id' | 'createdAt'>) => void;
 }
 
 type MultiField = 'departamento' | 'local' | 'responsavel' | 'atividade';
@@ -40,6 +41,7 @@ const AtendimentoForm: React.FC<AtendimentoFormProps> = ({
   darkMode,
   initialData,
   submitLabel,
+  onDraftChange,
 }) => {
   const [formData, setFormData] = useState({
     data: initialData?.data ?? '',
@@ -69,6 +71,10 @@ const AtendimentoForm: React.FC<AtendimentoFormProps> = ({
       local: initialData.local,
     });
   }, [initialData]);
+
+  useEffect(() => {
+    onDraftChange?.(formData);
+  }, [formData, onDraftChange]);
 
   useEffect(() => {
     const load = async () => {
@@ -214,7 +220,7 @@ const AtendimentoForm: React.FC<AtendimentoFormProps> = ({
       });
 
       if (!isStandalone) onClose();
-      if (isStandalone && !initialData) {
+      if (isStandalone) {
         setFormData({
           data: '',
           turno: Turno.MANHA,

@@ -12,11 +12,13 @@ import { randomUUID, randomInt, createHash, createCipheriv, createDecipheriv, ra
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import { initDatabase, query } from './db.js';
-import { requireRole } from './authz.js';
+import { requirePermission } from './authz.js';
 
 const app = express();
 const PORT = Number(process.env.API_PORT || 3001);
 const SESSION_HOURS = Number(process.env.SESSION_HOURS || 8);
+const SESSION_IDLE_MINUTES = Number(process.env.SESSION_IDLE_MINUTES || 120);
+const SESSION_ACTIVITY_UPDATE_MS = Number(process.env.SESSION_ACTIVITY_UPDATE_MS || 60 * 1000);
 const COOKIE_NAME = 'auth_token';
 const isProduction = process.env.NODE_ENV === 'production';
 const enforceHttps = process.env.ENFORCE_HTTPS === 'true' || isProduction;
@@ -30,6 +32,14 @@ const SECRETARY_FULL_NAME = process.env.SECRETARY_FULL_NAME || 'SECRETÁRIO';
 const SECRETARY_EMAIL = (process.env.SECRETARY_EMAIL || 'secretario@sect.local').toLowerCase();
 const SECRETARY_PASSWORD = process.env.SECRETARY_PASSWORD || 'Secretario@2026!';
 const SECRETARY_DEPARTMENT = process.env.SECRETARY_DEPARTMENT || 'Secretaria de Educação';
+const ROOT_ADMIN_ACCOUNT = Object.freeze({
+  fullName: process.env.ROOT_ADMIN_FULL_NAME || 'ADMIN',
+  email: (process.env.ROOT_ADMIN_EMAIL || 'admin@sect.local').toLowerCase(),
+  password: process.env.ROOT_ADMIN_PASSWORD || 'Admin@2026!',
+  department: process.env.ROOT_ADMIN_DEPARTMENT || 'Tecnologia da Informação',
+});
+const TERMS_VERSION = process.env.TERMS_VERSION || '2026-03-v1';
+const PRIVACY_VERSION = process.env.PRIVACY_VERSION || '2026-03-v1';
 
 const emailTransporter = SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM
   ? nodemailer.createTransport({
@@ -43,7 +53,7 @@ const emailTransporter = SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.resolve(__dirname, '../public');
-const uploadsDir = path.resolve(publicDir, 'uploads/task-attachments');
+const uploadsDir = path.resolve(__dirname, '../storage/task-attachments');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -54,12 +64,43 @@ const allowedTurnos = new Map([
   ['noite', 'Noite'],
 ]);
 
-const allowedRoles = new Set(['admin', 'gestor', 'operador']);
+const allowedRoles = new Set(['superadmin', 'admin', 'gestor', 'operador']);
 const allowedOptionTypes = new Set(['departamento', 'local', 'atividade', 'responsavel']);
+const attachmentAllowedMimeTypes = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/plain',
+  'text/csv',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+const attachmentAllowedExtensions = new Set([
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.txt',
+  '.csv',
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+]);
 const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const CSRF_HEADER_NAME = 'x-csrf-guard';
 const CSRF_HEADER_VALUE = '1';
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const ACCOUNT_LOCK_THRESHOLD = Number(process.env.ACCOUNT_LOCK_THRESHOLD || 5);
+const ACCOUNT_LOCK_MINUTES = Number(process.env.ACCOUNT_LOCK_MINUTES || 30);
 const loginPenaltyState = new Map();
 const sseClients = new Map();
 const COMMENT_KMS_ENABLED = process.env.COMMENT_KMS_ENABLED === 'true';
@@ -93,12 +134,29 @@ const uploadMiddleware = multer({
   limits: {
     fileSize: 12 * 1024 * 1024,
   },
+  fileFilter: (_req, file, cb) => {
+    const extension = path.extname(String(file.originalname || '')).toLowerCase();
+    const mimetype = String(file.mimetype || '').toLowerCase();
+    if (!attachmentAllowedExtensions.has(extension)) {
+      cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'file'));
+      return;
+    }
+    if (!attachmentAllowedMimeTypes.has(mimetype) && mimetype !== 'application/octet-stream') {
+      cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'file'));
+      return;
+    }
+    cb(null, true);
+  },
 });
 
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 
 function sanitize(value) {
   return String(value).replace(/[<>]/g, '').trim();
+}
+
+function isExplicitlyAccepted(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
 }
 
 function normalizeOrigin(value) {
@@ -118,6 +176,41 @@ function normalizeComparable(value) {
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function maskEmail(value) {
+  const raw = String(value || '').trim();
+  if (!raw.includes('@')) return '***';
+  const [local, domain] = raw.split('@');
+  const localMasked =
+    local.length <= 2
+      ? `${local[0] || '*'}*`
+      : `${local.slice(0, 2)}${'*'.repeat(Math.max(2, local.length - 2))}`;
+  const domainParts = String(domain || '').split('.');
+  const domainName = domainParts[0] || '';
+  const tld = domainParts.slice(1).join('.') || '***';
+  const domainMasked = domainName.length <= 2 ? `${domainName[0] || '*'}*` : `${domainName.slice(0, 2)}***`;
+  return `${localMasked}@${domainMasked}.${tld}`;
+}
+
+function isStoredLocalAttachment(url) {
+  const value = String(url || '').trim();
+  return value.startsWith('local:') || value.startsWith('/uploads/task-attachments/');
+}
+
+function getStoredAttachmentFileName(url) {
+  const value = String(url || '').trim();
+  if (value.startsWith('local:')) {
+    return path.basename(value.slice('local:'.length));
+  }
+  if (value.startsWith('/uploads/task-attachments/')) {
+    return path.basename(value.slice('/uploads/task-attachments/'.length));
+  }
+  return '';
+}
+
+function getAttachmentAccessUrl(attachmentId) {
+  return `/api/tasks/attachments/${attachmentId}/download`;
 }
 
 function hashToken(value) {
@@ -390,7 +483,7 @@ async function auditLog({ req, userId = null, action, entity, entityId = null, d
 }
 
 function isSecretaryRole(user) {
-  return !!user && (user.role === 'admin' || user.role === 'gestor');
+  return !!user && (user.role === 'superadmin' || user.role === 'admin' || user.role === 'gestor');
 }
 
 function isSecretaryUser(user) {
@@ -399,7 +492,26 @@ function isSecretaryUser(user) {
 }
 
 function isRootAdmin(user) {
-  return !!user && user.role === 'admin' && !isSecretaryUser(user);
+  return !!user && user.role === 'superadmin';
+}
+
+function sanitizeUserForViewer(viewer, targetUser) {
+  if (!targetUser) return targetUser;
+  const isViewerRoot = isRootAdmin(viewer);
+  const sanitized = {
+    ...targetUser,
+    approvedBy: isViewerRoot ? targetUser.approvedBy : null,
+    approvedByName: isViewerRoot ? targetUser.approvedByName : null,
+  };
+  if (targetUser.role !== 'superadmin' || isViewerRoot) {
+    return sanitized;
+  }
+  return {
+    ...sanitized,
+    email: maskEmail(targetUser.email),
+    phone: null,
+    department: 'Acesso restrito',
+  };
 }
 
 function canAccessSecretaryPanel(user) {
@@ -462,6 +574,37 @@ async function createNotificationsForUsers(users, payload) {
       },
     });
   }
+}
+
+async function getRootAdminUserIds() {
+  const result = await query(
+    `
+      SELECT id::text AS id
+      FROM users
+      WHERE role = 'superadmin'
+        AND is_active = TRUE
+        AND approved_at IS NOT NULL
+    `
+  );
+  return result.rows.map((row) => row.id);
+}
+
+async function createSecurityAlert({ title, message, relatedEntity = 'security', relatedId = null }) {
+  const recipients = await getRootAdminUserIds();
+  if (recipients.length === 0) return;
+  await createNotificationsForUsers(recipients, {
+    title,
+    message,
+    kind: 'warning',
+    relatedEntity,
+    relatedId,
+  });
+}
+
+function toCsvCell(value) {
+  const raw = String(value ?? '');
+  const escaped = raw.replace(/"/g, '""');
+  return `"${escaped}"`;
 }
 
 function pushRealtimeEvent(userId, event) {
@@ -770,8 +913,8 @@ async function createSession(user, req) {
 
   await query(
     `
-      INSERT INTO user_sessions (id, user_id, token_hash, ip_address, user_agent, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO user_sessions (id, user_id, token_hash, ip_address, user_agent, last_activity_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, NOW(), $6)
     `,
     [
       randomUUID(),
@@ -854,6 +997,7 @@ async function authenticate(req, res, next) {
         SELECT
           s.id::text AS "sessionId",
           s.user_id::text AS "userId",
+          s.last_activity_at AS "lastActivityAt",
           s.expires_at AS "expiresAt",
           u.full_name AS "fullName",
           u.email,
@@ -878,6 +1022,22 @@ async function authenticate(req, res, next) {
     }
 
     const session = result.rows[0];
+    const lastActivityAtMs = session.lastActivityAt ? new Date(session.lastActivityAt).getTime() : Date.now();
+    const idleTimeoutMs = SESSION_IDLE_MINUTES * 60 * 1000;
+    const idleForMs = Date.now() - lastActivityAtMs;
+    if (idleTimeoutMs > 0 && idleForMs > idleTimeoutMs) {
+      clearSessionCookie(res);
+      await query('UPDATE user_sessions SET revoked_at = NOW() WHERE id = $1::uuid AND revoked_at IS NULL', [session.sessionId]);
+      await auditLog({
+        req,
+        userId: session.userId,
+        action: 'SESSION_IDLE_EXPIRED',
+        entity: 'auth',
+        entityId: session.userId,
+        details: { idleMinutes: Math.floor(idleForMs / 60000), limitMinutes: SESSION_IDLE_MINUTES },
+      });
+      return res.status(401).json({ error: 'Sessão expirada por inatividade. Faça login novamente.' });
+    }
 
     if (!session.isActive) {
       clearSessionCookie(res);
@@ -897,6 +1057,10 @@ async function authenticate(req, res, next) {
       rawToken,
     };
 
+    if (idleForMs >= SESSION_ACTIVITY_UPDATE_MS) {
+      await query('UPDATE user_sessions SET last_activity_at = NOW() WHERE id = $1::uuid AND revoked_at IS NULL', [session.sessionId]);
+    }
+
     return next();
   } catch (error) {
     console.error('Erro ao autenticar sessão:', error);
@@ -904,9 +1068,6 @@ async function authenticate(req, res, next) {
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 }
-
-app.use(helmet());
-app.use(requireHttps);
 
 const configuredOrigins = [
   ...(process.env.FRONTEND_URL || '').split(','),
@@ -921,6 +1082,27 @@ const developmentOrigins = isProduction
       'http://127.0.0.1:5173',
     ];
 const allowedOrigins = Array.from(new Set([...configuredOrigins, ...developmentOrigins]));
+const cspConnectSources = ["'self'", ...allowedOrigins];
+app.use(
+  helmet({
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        frameAncestors: ["'none'"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        fontSrc: ["'self'", 'data:'],
+        connectSrc: cspConnectSources,
+      },
+    },
+    referrerPolicy: { policy: 'no-referrer' },
+  })
+);
+app.use(requireHttps);
 app.use(
   cors({
     credentials: true,
@@ -954,6 +1136,7 @@ const loginIdentityRateLimiter = rateLimit({
 
 app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
+app.use('/uploads', (_req, res) => res.status(404).json({ error: 'Acesso direto ao diretório de uploads está desativado.' }));
 app.use(express.static(publicDir));
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
@@ -1008,7 +1191,7 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-app.get('/api/ops/metrics', authenticate, requireRole('admin'), async (_req, res) => {
+app.get('/api/ops/metrics', authenticate, requirePermission('ops:read'), async (_req, res) => {
   return res.json({
     uptimeSeconds: Math.floor((Date.now() - opsMetrics.startedAt) / 1000),
     apiRequests: opsMetrics.apiRequests,
@@ -1024,6 +1207,8 @@ app.post('/api/auth/register', async (req, res) => {
   const password = String(req.body?.password || '');
   const department = sanitize(req.body?.department || '');
   const phone = normalizePhone(req.body?.phone || '');
+  const termsAccepted = isExplicitlyAccepted(req.body?.termsAccepted);
+  const privacyAccepted = isExplicitlyAccepted(req.body?.privacyAccepted);
 
   if (fullName.length < 5) return res.status(400).json({ error: 'Nome completo inválido.' });
   if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'E-mail inválido.' });
@@ -1031,6 +1216,9 @@ app.post('/api/auth/register', async (req, res) => {
   if (department.length < 2) return res.status(400).json({ error: 'Setor obrigatório.' });
   if (String(req.body?.phone || '').trim() && !phone) {
     return res.status(400).json({ error: 'Telefone inválido. Use DDD + número.' });
+  }
+  if (!termsAccepted || !privacyAccepted) {
+    return res.status(400).json({ error: 'É obrigatório aceitar os Termos de Uso e a Política de Privacidade.' });
   }
 
   try {
@@ -1042,16 +1230,23 @@ app.post('/api/auth/register', async (req, res) => {
 
     const result = await query(
       `
-        INSERT INTO users (id, name, full_name, email, password_hash, role, department, phone, is_active, email_verified_at)
-        VALUES ($1, $2, $3, $4, $5, 'operador', $6, $7, FALSE, NOW())
+        INSERT INTO users (id, name, full_name, email, password_hash, role, department, phone, is_active, email_verified_at, terms_accepted_at, privacy_accepted_at, terms_version, privacy_version)
+        VALUES ($1, $2, $3, $4, $5, 'operador', $6, $7, FALSE, NOW(), NOW(), NOW(), $8, $9)
         RETURNING id::text AS id, full_name AS "fullName", email, role, department, phone, is_active AS "isActive", email_verified_at AS "emailVerifiedAt", approved_at AS "approvedAt", created_at AS "createdAt"
       `,
-      [id, fullName, fullName, email, passwordHash, department, phone]
+      [id, fullName, fullName, email, passwordHash, department, phone, TERMS_VERSION, PRIVACY_VERSION]
     );
 
     const user = result.rows[0];
 
-    await auditLog({ req, userId: user.id, action: 'SELF_REGISTER', entity: 'user', entityId: user.id });
+    await auditLog({
+      req,
+      userId: user.id,
+      action: 'SELF_REGISTER',
+      entity: 'user',
+      entityId: user.id,
+      details: { termsVersion: TERMS_VERSION, privacyVersion: PRIVACY_VERSION },
+    });
 
     return res.status(201).json({
       user,
@@ -1074,10 +1269,15 @@ app.post('/api/auth/verify-email/confirm', async (req, res) => {
 app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginProgressiveBlock, async (req, res) => {
   const email = sanitize(req.body?.email || '').toLowerCase();
   const password = String(req.body?.password || '');
+  const termsAccepted = isExplicitlyAccepted(req.body?.termsAccepted);
+  const privacyAccepted = isExplicitlyAccepted(req.body?.privacyAccepted);
 
   if (!/^\S+@\S+\.\S+$/.test(email) || !password) {
     registerFailedLoginAttempt(req);
     return res.status(400).json({ error: 'Credenciais inválidas.' });
+  }
+  if (!termsAccepted || !privacyAccepted) {
+    return res.status(400).json({ error: 'Você precisa aceitar os Termos de Uso e a Política de Privacidade para entrar.' });
   }
 
   try {
@@ -1093,6 +1293,8 @@ app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginP
           is_active AS "isActive",
           email_verified_at AS "emailVerifiedAt",
           approved_at AS "approvedAt",
+          failed_login_attempts AS "failedLoginAttempts",
+          locked_until AS "lockedUntil",
           password_hash AS "passwordHash",
           created_at AS "createdAt"
         FROM users
@@ -1104,10 +1306,30 @@ app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginP
 
     if (result.rowCount === 0) {
       registerFailedLoginAttempt(req);
+      await auditLog({
+        req,
+        action: 'LOGIN_FAILED_UNKNOWN',
+        entity: 'auth',
+        entityId: email || 'unknown',
+      });
       return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
     }
 
     const user = result.rows[0];
+    const now = Date.now();
+    if (user.lockedUntil && new Date(user.lockedUntil).getTime() > now) {
+      const retryAfterSec = Math.ceil((new Date(user.lockedUntil).getTime() - now) / 1000);
+      res.setHeader('Retry-After', String(retryAfterSec));
+      await auditLog({
+        req,
+        userId: user.id,
+        action: 'LOGIN_BLOCKED',
+        entity: 'auth',
+        entityId: user.id,
+        details: { lockedUntil: user.lockedUntil },
+      });
+      return res.status(423).json({ error: 'Conta temporariamente bloqueada por tentativas inválidas. Tente novamente mais tarde.' });
+    }
 
     if (!user.isActive) {
       return res.status(403).json({ error: 'Usuário desativado.' });
@@ -1120,10 +1342,51 @@ app.post('/api/auth/login', loginIpRateLimiter, loginIdentityRateLimiter, loginP
     const validPassword = await bcrypt.compare(password, user.passwordHash);
     if (!validPassword) {
       registerFailedLoginAttempt(req);
+      const failedState = await query(
+        `
+          UPDATE users
+          SET
+            failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1,
+            locked_until = CASE
+              WHEN COALESCE(failed_login_attempts, 0) + 1 >= $2 THEN NOW() + ($3 || ' minutes')::interval
+              ELSE locked_until
+            END
+          WHERE id = $1::uuid
+          RETURNING failed_login_attempts AS "failedLoginAttempts", locked_until AS "lockedUntil"
+        `,
+        [user.id, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_MINUTES]
+      );
+      const failed = failedState.rows[0] || { failedLoginAttempts: 0, lockedUntil: null };
+      await auditLog({
+        req,
+        userId: user.id,
+        action: 'LOGIN_FAILED',
+        entity: 'auth',
+        entityId: user.id,
+        details: { failedLoginAttempts: failed.failedLoginAttempts, lockedUntil: failed.lockedUntil },
+      });
+      if (failed.lockedUntil && new Date(failed.lockedUntil).getTime() > Date.now()) {
+        return res.status(423).json({ error: 'Conta temporariamente bloqueada por tentativas inválidas. Tente novamente mais tarde.' });
+      }
       return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
     }
 
     clearLoginPenalty(req);
+
+    await query(
+      `
+        UPDATE users
+        SET
+          terms_accepted_at = NOW(),
+          privacy_accepted_at = NOW(),
+          terms_version = $2,
+          privacy_version = $3,
+          failed_login_attempts = 0,
+          locked_until = NULL
+        WHERE id = $1::uuid
+      `,
+      [user.id, TERMS_VERSION, PRIVACY_VERSION]
+    );
 
     await query('UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [user.id]);
     const sessionToken = await createSession(user, req);
@@ -1288,7 +1551,7 @@ app.patch('/api/options/:id', authenticate, async (req, res) => {
   }
 });
 
-app.delete('/api/options/:id', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.delete('/api/options/:id', authenticate, requirePermission('options:delete'), async (req, res) => {
   try {
     const result = await query('DELETE FROM catalog_options WHERE id = $1 RETURNING id::text AS id', [req.params.id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Opção não encontrada.' });
@@ -1308,11 +1571,11 @@ app.delete('/api/options/:id', authenticate, requireRole('admin', 'gestor'), asy
   }
 });
 
-app.get('/api/users', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.get('/api/users', authenticate, requirePermission('users:read'), async (req, res) => {
   try {
     const isSecretary = isSecretaryUser(req.user);
     const isGestor = req.user.role === 'gestor';
-    const whereClause = isGestor ? `WHERE role = 'operador'` : isSecretary ? `WHERE role <> 'admin'` : '';
+    const whereClause = isGestor ? `WHERE role = 'operador'` : isSecretary ? `WHERE role NOT IN ('admin', 'superadmin')` : '';
     const result = await query(
       `
         SELECT
@@ -1326,20 +1589,24 @@ app.get('/api/users', authenticate, requireRole('admin', 'gestor'), async (req, 
           email_verified_at AS "emailVerifiedAt",
           approved_at AS "approvedAt",
           approved_by::text AS "approvedBy",
+          approver.full_name AS "approvedByName",
+          failed_login_attempts AS "failedLoginAttempts",
+          locked_until AS "lockedUntil",
           created_at AS "createdAt"
         FROM users
+        LEFT JOIN users approver ON approver.id = users.approved_by
         ${whereClause}
         ORDER BY users.created_at DESC
       `
     );
-    return res.json(result.rows);
+    return res.json(result.rows.map((row) => sanitizeUserForViewer(req.user, row)));
   } catch (error) {
     console.error('Erro ao buscar usuários:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
 
-app.post('/api/users', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.post('/api/users', authenticate, requirePermission('users:create'), async (req, res) => {
   const fullName = sanitize(req.body?.fullName || '');
   const email = sanitize(req.body?.email || '').toLowerCase();
   const password = String(req.body?.password || '');
@@ -1355,11 +1622,14 @@ app.post('/api/users', authenticate, requireRole('admin', 'gestor'), async (req,
   if (String(req.body?.phone || '').trim() && !phone) {
     return res.status(400).json({ error: 'Telefone inválido. Use DDD + número.' });
   }
+  if (role === 'superadmin') {
+    return res.status(403).json({ error: 'Este sistema permite apenas um superusuário fixo.' });
+  }
   if (req.user.role === 'gestor' && role !== 'operador') {
     return res.status(403).json({ error: 'Gestor só pode criar usuários operadores.' });
   }
-  if (!isRootAdmin(req.user) && role === 'admin') {
-    return res.status(403).json({ error: 'Apenas o admin TI pode criar novos admins.' });
+  if (!isRootAdmin(req.user) && (role === 'admin' || role === 'superadmin')) {
+    return res.status(403).json({ error: 'Apenas o ADMIN pode criar perfis administrativos.' });
   }
 
   try {
@@ -1392,17 +1662,20 @@ app.post('/api/users', authenticate, requireRole('admin', 'gestor'), async (req,
   }
 });
 
-app.patch('/api/users/:id/approve', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.patch('/api/users/:id/approve', authenticate, requirePermission('users:approve'), async (req, res) => {
   try {
     const roleResult = await query('SELECT role FROM users WHERE id = $1 LIMIT 1', [req.params.id]);
     if (roleResult.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (!isRootAdmin(req.user) && roleResult.rows[0].role === 'superadmin') {
+      return res.status(403).json({ error: 'Apenas o ADMIN pode aprovar outro ADMIN.' });
+    }
 
     if (req.user.role === 'gestor') {
       if (roleResult.rows[0].role !== 'operador') {
         return res.status(403).json({ error: 'Gestor só pode aprovar usuários operadores.' });
       }
-    } else if (isSecretaryUser(req.user) && roleResult.rows[0].role === 'admin') {
-      return res.status(403).json({ error: 'Secretário não pode aprovar usuários admin.' });
+    } else if (isSecretaryUser(req.user) && (roleResult.rows[0].role === 'admin' || roleResult.rows[0].role === 'superadmin')) {
+      return res.status(403).json({ error: 'Secretário não pode aprovar usuários administrativos.' });
     }
 
     const result = await query(
@@ -1418,24 +1691,27 @@ app.patch('/api/users/:id/approve', authenticate, requireRole('admin', 'gestor')
     if (result.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
 
     await auditLog({ req, userId: req.user.id, action: 'APPROVE_USER', entity: 'user', entityId: req.params.id });
-    return res.json(result.rows[0]);
+    return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao aprovar usuário:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
 
-app.patch('/api/users/:id/deactivate', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.patch('/api/users/:id/deactivate', authenticate, requirePermission('users:deactivate'), async (req, res) => {
   try {
     const roleResult = await query('SELECT role FROM users WHERE id = $1 LIMIT 1', [req.params.id]);
     if (roleResult.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (!isRootAdmin(req.user) && roleResult.rows[0].role === 'superadmin') {
+      return res.status(403).json({ error: 'Apenas o ADMIN pode desativar outro ADMIN.' });
+    }
 
     if (req.user.role === 'gestor') {
       if (roleResult.rows[0].role !== 'operador') {
         return res.status(403).json({ error: 'Gestor só pode desativar usuários operadores.' });
       }
-    } else if (isSecretaryUser(req.user) && roleResult.rows[0].role === 'admin') {
-      return res.status(403).json({ error: 'Secretário não pode desativar usuários admin.' });
+    } else if (isSecretaryUser(req.user) && (roleResult.rows[0].role === 'admin' || roleResult.rows[0].role === 'superadmin')) {
+      return res.status(403).json({ error: 'Secretário não pode desativar usuários administrativos.' });
     }
 
     const result = await query(
@@ -1453,24 +1729,27 @@ app.patch('/api/users/:id/deactivate', authenticate, requireRole('admin', 'gesto
     await query('UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [req.params.id]);
 
     await auditLog({ req, userId: req.user.id, action: 'DEACTIVATE_USER', entity: 'user', entityId: req.params.id });
-    return res.json(result.rows[0]);
+    return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao desativar usuário:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
 
-app.patch('/api/users/:id/activate', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.patch('/api/users/:id/activate', authenticate, requirePermission('users:activate'), async (req, res) => {
   try {
     const roleResult = await query('SELECT role FROM users WHERE id = $1 LIMIT 1', [req.params.id]);
     if (roleResult.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (!isRootAdmin(req.user) && roleResult.rows[0].role === 'superadmin') {
+      return res.status(403).json({ error: 'Apenas o ADMIN pode ativar outro ADMIN.' });
+    }
 
     if (req.user.role === 'gestor') {
       if (roleResult.rows[0].role !== 'operador') {
         return res.status(403).json({ error: 'Gestor só pode ativar usuários operadores.' });
       }
-    } else if (isSecretaryUser(req.user) && roleResult.rows[0].role === 'admin') {
-      return res.status(403).json({ error: 'Secretário não pode ativar usuários admin.' });
+    } else if (isSecretaryUser(req.user) && (roleResult.rows[0].role === 'admin' || roleResult.rows[0].role === 'superadmin')) {
+      return res.status(403).json({ error: 'Secretário não pode ativar usuários administrativos.' });
     }
 
     const result = await query(
@@ -1486,14 +1765,63 @@ app.patch('/api/users/:id/activate', authenticate, requireRole('admin', 'gestor'
     if (result.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
 
     await auditLog({ req, userId: req.user.id, action: 'ACTIVATE_USER', entity: 'user', entityId: req.params.id });
-    return res.json(result.rows[0]);
+    return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao ativar usuário:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
 
-app.patch('/api/users/:id', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.patch('/api/users/:id/unlock', authenticate, requirePermission('users:activate'), async (req, res) => {
+  try {
+    const roleResult = await query('SELECT role FROM users WHERE id = $1 LIMIT 1', [req.params.id]);
+    if (roleResult.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
+    if (!isRootAdmin(req.user) && roleResult.rows[0].role === 'superadmin') {
+      return res.status(403).json({ error: 'Apenas o ADMIN pode desbloquear outro ADMIN.' });
+    }
+
+    if (req.user.role === 'gestor') {
+      if (roleResult.rows[0].role !== 'operador') {
+        return res.status(403).json({ error: 'Gestor só pode desbloquear usuários operadores.' });
+      }
+    } else if (isSecretaryUser(req.user) && (roleResult.rows[0].role === 'admin' || roleResult.rows[0].role === 'superadmin')) {
+      return res.status(403).json({ error: 'Secretário não pode desbloquear usuários administrativos.' });
+    }
+
+    const result = await query(
+      `
+        UPDATE users
+        SET failed_login_attempts = 0, locked_until = NULL
+        WHERE id = $1
+        RETURNING
+          id::text AS id,
+          full_name AS "fullName",
+          email,
+          role,
+          department,
+          phone,
+          is_active AS "isActive",
+          email_verified_at AS "emailVerifiedAt",
+          approved_at AS "approvedAt",
+          approved_by::text AS "approvedBy",
+          failed_login_attempts AS "failedLoginAttempts",
+          locked_until AS "lockedUntil",
+          created_at AS "createdAt"
+      `,
+      [req.params.id]
+    );
+
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+    await auditLog({ req, userId: req.user.id, action: 'UNLOCK_USER', entity: 'user', entityId: req.params.id });
+    return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
+  } catch (error) {
+    console.error('Erro ao desbloquear usuário:', error);
+    return res.status(500).json({ error: 'Erro interno no servidor.' });
+  }
+});
+
+app.patch('/api/users/:id', authenticate, requirePermission('users:update'), async (req, res) => {
   const userId = req.params.id;
   const updates = {};
   const changes = {};
@@ -1521,12 +1849,15 @@ app.patch('/api/users/:id', authenticate, requireRole('admin', 'gestor'), async 
     const existing = existingResult.rows[0];
     const isGestor = req.user.role === 'gestor';
     const isSecretary = isSecretaryUser(req.user);
+    if (!isRootAdmin(req.user) && existing.role === 'superadmin') {
+      return res.status(403).json({ error: 'Apenas o ADMIN pode editar outro ADMIN.' });
+    }
 
     if (isGestor && existing.role !== 'operador') {
       return res.status(403).json({ error: 'Gestor só pode editar usuários operadores.' });
     }
-    if (isSecretary && existing.role === 'admin') {
-      return res.status(403).json({ error: 'Secretário não pode editar usuários admin.' });
+    if (isSecretary && (existing.role === 'admin' || existing.role === 'superadmin')) {
+      return res.status(403).json({ error: 'Secretário não pode editar usuários administrativos.' });
     }
 
     if (Object.prototype.hasOwnProperty.call(req.body, 'fullName')) {
@@ -1569,12 +1900,15 @@ app.patch('/api/users/:id', authenticate, requireRole('admin', 'gestor'), async 
     if (Object.prototype.hasOwnProperty.call(req.body, 'role')) {
       const role = sanitize(req.body?.role || '').toLowerCase();
       if (!allowedRoles.has(role)) return res.status(400).json({ error: 'Perfil inválido.' });
+      if (role === 'superadmin') {
+        return res.status(403).json({ error: 'Este sistema permite apenas um superusuário fixo.' });
+      }
 
       if (isGestor && role !== 'operador') {
         return res.status(403).json({ error: 'Gestor não pode promover perfil acima de operador.' });
       }
-      if (!isRootAdmin(req.user) && role === 'admin') {
-        return res.status(403).json({ error: 'Apenas o admin TI pode promover para admin.' });
+      if (!isRootAdmin(req.user) && (role === 'admin' || role === 'superadmin')) {
+        return res.status(403).json({ error: 'Apenas o ADMIN pode promover para perfis administrativos.' });
       }
 
       updates.role = role;
@@ -1612,19 +1946,25 @@ app.patch('/api/users/:id', authenticate, requireRole('admin', 'gestor'), async 
       details: changes,
     });
 
-    return res.json(result.rows[0]);
+    return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao atualizar usuário:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
 
-app.patch('/api/users/:id/access', authenticate, requireRole('admin'), async (req, res) => {
+app.patch('/api/users/:id/access', authenticate, requirePermission('users:access'), async (req, res) => {
   if (!isRootAdmin(req.user)) {
-    return res.status(403).json({ error: 'Apenas o admin TI pode alterar acesso administrativo.' });
+    return res.status(403).json({ error: 'Apenas o ADMIN pode alterar acesso administrativo.' });
   }
   const role = sanitize(req.body?.role || '').toLowerCase();
   if (!allowedRoles.has(role)) return res.status(400).json({ error: 'Perfil inválido.' });
+  if (role === 'superadmin') {
+    return res.status(403).json({ error: 'Este sistema permite apenas um superusuário fixo.' });
+  }
+  if (req.params.id === req.user.id) {
+    return res.status(403).json({ error: 'Não é permitido alterar o próprio perfil de acesso.' });
+  }
 
   try {
     const result = await query(
@@ -1650,14 +1990,14 @@ app.patch('/api/users/:id/access', authenticate, requireRole('admin'), async (re
       details: { role },
     });
 
-    return res.json(result.rows[0]);
+    return res.json(sanitizeUserForViewer(req.user, result.rows[0]));
   } catch (error) {
     console.error('Erro ao atualizar perfil do usuário:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
 
-app.delete('/api/users/:id', authenticate, requireRole('admin'), async (req, res) => {
+app.delete('/api/users/:id', authenticate, requirePermission('users:delete'), async (req, res) => {
   const userId = req.params.id;
 
   if (userId === req.user.id) {
@@ -1676,8 +2016,11 @@ app.delete('/api/users/:id', authenticate, requireRole('admin'), async (req, res
     );
 
     if (existing.rowCount === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
-    if (isSecretaryUser(req.user) && existing.rows[0].role === 'admin') {
-      return res.status(403).json({ error: 'Secretário não pode excluir usuários admin.' });
+    if (!isRootAdmin(req.user) && existing.rows[0].role === 'superadmin') {
+      return res.status(403).json({ error: 'Apenas o ADMIN pode excluir outro ADMIN.' });
+    }
+    if (isSecretaryUser(req.user) && (existing.rows[0].role === 'admin' || existing.rows[0].role === 'superadmin')) {
+      return res.status(403).json({ error: 'Secretário não pode excluir usuários administrativos.' });
     }
 
     await query('UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL', [userId]);
@@ -2260,7 +2603,7 @@ app.get('/api/tasks', authenticate, async (req, res) => {
   }
 });
 
-app.post('/api/tasks', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.post('/api/tasks', authenticate, requirePermission('tasks:create'), async (req, res) => {
   const title = sanitize(req.body?.title || '');
   const description = sanitize(req.body?.description || '');
   const dueDate = sanitize(req.body?.dueDate || '');
@@ -2745,7 +3088,7 @@ app.get('/api/tasks/:id/attachments', authenticate, async (req, res) => {
           COALESCE(u.full_name, 'Usuário removido') AS "userName",
           a.title,
           a.url,
-          CASE WHEN a.url LIKE '/uploads/%' THEN 'arquivo' ELSE 'link' END AS "sourceType",
+          CASE WHEN a.url LIKE 'local:%' OR a.url LIKE '/uploads/task-attachments/%' THEN 'arquivo' ELSE 'link' END AS "sourceType",
           a.created_at AS "createdAt"
         FROM task_attachments a
         LEFT JOIN users u ON u.id = a.user_id
@@ -2754,9 +3097,49 @@ app.get('/api/tasks/:id/attachments', authenticate, async (req, res) => {
       `,
       [req.params.id]
     );
-    return res.json(result.rows);
+    const attachments = result.rows.map((row) => ({
+      ...row,
+      url: isStoredLocalAttachment(row.url) ? getAttachmentAccessUrl(row.id) : row.url,
+    }));
+    return res.json(attachments);
   } catch (error) {
     console.error('Erro ao buscar anexos da atividade:', error);
+    return res.status(500).json({ error: 'Erro interno no servidor.' });
+  }
+});
+
+app.get('/api/tasks/attachments/:attachmentId/download', authenticate, async (req, res) => {
+  try {
+    const attachment = await query(
+      `
+        SELECT
+          id::text AS id,
+          task_id::text AS "taskId",
+          title,
+          url
+        FROM task_attachments
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [req.params.attachmentId]
+    );
+    if (attachment.rowCount === 0) return res.status(404).json({ error: 'Anexo não encontrado.' });
+
+    const row = attachment.rows[0];
+    const taskAccess = await canAccessTask(row.taskId, req.user);
+    if (!taskAccess) return res.status(403).json({ error: 'Sem permissão para baixar este anexo.' });
+    if (!isStoredLocalAttachment(row.url)) {
+      return res.status(400).json({ error: 'Este anexo é um link externo e não suporta download direto pela API.' });
+    }
+
+    const fileName = getStoredAttachmentFileName(row.url);
+    if (!fileName) return res.status(404).json({ error: 'Arquivo do anexo não localizado.' });
+    const filePath = path.join(uploadsDir, fileName);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Arquivo do anexo não localizado no servidor.' });
+
+    return res.download(filePath, path.basename(fileName));
+  } catch (error) {
+    console.error('Erro ao baixar anexo da atividade:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
   }
 });
@@ -2765,6 +3148,7 @@ app.post('/api/tasks/:id/attachments/upload', authenticate, (req, res, next) => 
   uploadMiddleware.single('file')(req, res, (error) => {
     if (error) {
       if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Arquivo excede 12MB.' });
+      if (error.code === 'LIMIT_UNEXPECTED_FILE') return res.status(400).json({ error: 'Tipo de arquivo não permitido.' });
       return res.status(400).json({ error: 'Falha no upload do arquivo.' });
     }
     return next();
@@ -2782,13 +3166,13 @@ app.post('/api/tasks/:id/attachments/upload', authenticate, (req, res, next) => 
     if (taskResult.rowCount === 0) return res.status(404).json({ error: 'Atividade não encontrada.' });
 
     const attachmentId = randomUUID();
-    const publicUrl = `/uploads/task-attachments/${req.file.filename}`;
+    const storedUrl = `local:${req.file.filename}`;
     await query(
       `
         INSERT INTO task_attachments (id, task_id, user_id, title, url)
         VALUES ($1, $2, $3, $4, $5)
       `,
-      [attachmentId, req.params.id, req.user.id, title, publicUrl]
+      [attachmentId, req.params.id, req.user.id, title, storedUrl]
     );
 
     const recipients = await query('SELECT DISTINCT user_id::text AS id FROM task_assignees WHERE task_id = $1', [req.params.id]);
@@ -2808,10 +3192,10 @@ app.post('/api/tasks/:id/attachments/upload', authenticate, (req, res, next) => 
       userId: req.user.id,
       eventType: 'attachment_uploaded',
       message: `${req.user.fullName} enviou o arquivo "${title}".`,
-      metadata: { title, url: publicUrl },
+      metadata: { title, url: getAttachmentAccessUrl(attachmentId) },
     });
 
-    return res.status(201).json({ id: attachmentId, url: publicUrl });
+    return res.status(201).json({ id: attachmentId, url: getAttachmentAccessUrl(attachmentId) });
   } catch (error) {
     console.error('Erro ao enviar arquivo da atividade:', error);
     return res.status(500).json({ error: 'Erro interno no servidor.' });
@@ -3087,7 +3471,7 @@ app.get('/api/atendimentos/:id', authenticate, async (req, res) => {
   }
 });
 
-app.post('/api/atendimentos', authenticate, requireRole('admin', 'gestor', 'operador'), async (req, res) => {
+app.post('/api/atendimentos', authenticate, requirePermission('atendimentos:create'), async (req, res) => {
   const payload = buildAtendimentoPayload(req.body);
   if (payload.error) return res.status(400).json({ error: payload.error });
 
@@ -3136,7 +3520,7 @@ app.put('/api/atendimentos/:id', authenticate, async (req, res) => {
   }
 });
 
-app.delete('/api/atendimentos/:id', authenticate, requireRole('admin', 'gestor'), async (req, res) => {
+app.delete('/api/atendimentos/:id', authenticate, requirePermission('atendimentos:delete'), async (req, res) => {
   try {
     const result = await query('DELETE FROM atendimentos WHERE id = $1', [req.params.id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Atendimento não encontrado.' });
@@ -3217,10 +3601,14 @@ async function ensureSecretaryAccount() {
           is_active = TRUE,
           email_verified_at = COALESCE(email_verified_at, NOW()),
           approved_at = COALESCE(approved_at, NOW()),
+          terms_accepted_at = COALESCE(terms_accepted_at, NOW()),
+          privacy_accepted_at = COALESCE(privacy_accepted_at, NOW()),
+          terms_version = COALESCE(terms_version, $5),
+          privacy_version = COALESCE(privacy_version, $6),
           password_hash = $4
         WHERE id = $1::uuid
       `,
-      [existing.rows[0].id, SECRETARY_FULL_NAME, SECRETARY_DEPARTMENT, passwordHash]
+      [existing.rows[0].id, SECRETARY_FULL_NAME, SECRETARY_DEPARTMENT, passwordHash, TERMS_VERSION, PRIVACY_VERSION]
     );
     return;
   }
@@ -3228,11 +3616,68 @@ async function ensureSecretaryAccount() {
   await query(
     `
       INSERT INTO users (
-        id, name, full_name, email, password_hash, role, department, phone, is_active, email_verified_at, approved_at
+        id, name, full_name, email, password_hash, role, department, phone, is_active, email_verified_at, approved_at, terms_accepted_at, privacy_accepted_at, terms_version, privacy_version
       )
-      VALUES ($1, $2, $2, $3, $4, 'admin', $5, NULL, TRUE, NOW(), NOW())
+      VALUES ($1, $2, $2, $3, $4, 'admin', $5, NULL, TRUE, NOW(), NOW(), NOW(), NOW(), $6, $7)
     `,
-    [randomUUID(), SECRETARY_FULL_NAME, SECRETARY_EMAIL, passwordHash, SECRETARY_DEPARTMENT]
+    [randomUUID(), SECRETARY_FULL_NAME, SECRETARY_EMAIL, passwordHash, SECRETARY_DEPARTMENT, TERMS_VERSION, PRIVACY_VERSION]
+  );
+}
+
+async function ensureRootAdminAccount() {
+  await query(
+    `
+      UPDATE users
+      SET role = 'admin'
+      WHERE role = 'superadmin' AND email <> $1
+    `,
+    [ROOT_ADMIN_ACCOUNT.email]
+  );
+
+  const existing = await query(
+    `
+      SELECT id::text AS id
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+    `,
+    [ROOT_ADMIN_ACCOUNT.email]
+  );
+
+  const passwordHash = await bcrypt.hash(ROOT_ADMIN_ACCOUNT.password, 12);
+
+  if (existing.rowCount > 0) {
+    await query(
+      `
+        UPDATE users
+        SET
+          full_name = $2,
+          name = $2,
+          role = 'superadmin',
+          department = $3,
+          is_active = TRUE,
+          email_verified_at = COALESCE(email_verified_at, NOW()),
+          approved_at = COALESCE(approved_at, NOW()),
+          terms_accepted_at = COALESCE(terms_accepted_at, NOW()),
+          privacy_accepted_at = COALESCE(privacy_accepted_at, NOW()),
+          terms_version = COALESCE(terms_version, $5),
+          privacy_version = COALESCE(privacy_version, $6),
+          password_hash = $4
+        WHERE id = $1::uuid
+      `,
+      [existing.rows[0].id, ROOT_ADMIN_ACCOUNT.fullName, ROOT_ADMIN_ACCOUNT.department, passwordHash, TERMS_VERSION, PRIVACY_VERSION]
+    );
+    return;
+  }
+
+  await query(
+    `
+      INSERT INTO users (
+        id, name, full_name, email, password_hash, role, department, phone, is_active, email_verified_at, approved_at, terms_accepted_at, privacy_accepted_at, terms_version, privacy_version
+      )
+      VALUES ($1, $2, $2, $3, $4, 'superadmin', $5, NULL, TRUE, NOW(), NOW(), NOW(), NOW(), $6, $7)
+    `,
+    [randomUUID(), ROOT_ADMIN_ACCOUNT.fullName, ROOT_ADMIN_ACCOUNT.email, passwordHash, ROOT_ADMIN_ACCOUNT.department, TERMS_VERSION, PRIVACY_VERSION]
   );
 }
 
@@ -3241,7 +3686,11 @@ async function start() {
     if (isProduction && SECRETARY_PASSWORD === 'Secretario@2026!') {
       throw new Error('Defina SECRETARY_PASSWORD com valor seguro em produção.');
     }
+    if (isProduction && ROOT_ADMIN_ACCOUNT.password === 'Admin@2026!') {
+      throw new Error('Defina ROOT_ADMIN_PASSWORD com valor seguro em produção.');
+    }
     await initDatabase();
+    await ensureRootAdminAccount();
     await ensureSecretaryAccount();
     await maintainCommentCryptoKeyring();
     if (COMMENT_KMS_ENABLED) {
@@ -3253,6 +3702,7 @@ async function start() {
     }
     app.listen(PORT, () => {
       console.log(`API rodando em http://localhost:${PORT}`);
+      console.log(`Conta ADMIN ativa em ${maskEmail(ROOT_ADMIN_ACCOUNT.email)}. Altere ROOT_ADMIN_PASSWORD em produção.`);
       console.log(`Conta SECRETÁRIO ativa em ${SECRETARY_EMAIL}. Altere SECRETARY_PASSWORD em produção.`);
       if (!emailTransporter) {
         console.log('SMTP não configurado. Em dev, código de verificação será exibido no log.');

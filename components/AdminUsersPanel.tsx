@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useMemo, useState } from 'react';
-import { FiCheckCircle, FiCircle, FiEdit2, FiEye, FiEyeOff, FiShield, FiTrash2, FiUserX } from 'react-icons/fi';
+import { FiCheckCircle, FiCircle, FiEdit2, FiEye, FiEyeOff, FiShield, FiTrash2, FiUnlock, FiUserX } from 'react-icons/fi';
 import { AdminUser, AuthUser, CreateUserPayload, UpdateUserPayload, userAdminService } from '../services/api';
 import AlertBanner from './ui/AlertBanner';
 import ModalDialog from './ui/ModalDialog';
@@ -29,6 +29,7 @@ const initialEditForm: UpdateUserPayload = {
 };
 
 const roleLabel: Record<AdminUser['role'], string> = {
+  superadmin: 'ADMIN',
   admin: 'Admin',
   gestor: 'Gestor',
   operador: 'Operador',
@@ -45,6 +46,11 @@ function formatPhone(value: string): string {
 function isPhoneValid(value?: string | null): boolean {
   const digits = String(value || '').replace(/\D/g, '');
   return !digits || digits.length === 10 || digits.length === 11;
+}
+
+function isUserLocked(user: AdminUser): boolean {
+  if (!user.lockedUntil) return false;
+  return new Date(user.lockedUntil).getTime() > Date.now();
 }
 
 const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUserRole, currentUserId, isSecretaryUser = false }) => {
@@ -68,6 +74,7 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
   const [userToDelete, setUserToDelete] = useState<AdminUser | null>(null);
   const [showCreatePassword, setShowCreatePassword] = useState(false);
 
+  const isSuperAdmin = currentUserRole === 'superadmin';
   const isAdmin = currentUserRole === 'admin';
   const isGestor = currentUserRole === 'gestor';
   const isLimitedAdmin = isAdmin && isSecretaryUser;
@@ -110,14 +117,17 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
   }, [isGestor]);
 
   const canManageUser = (user: AdminUser): boolean => {
-    if (isLimitedAdmin) return user.role !== 'admin';
-    if (isAdmin) return true;
+    if (isSuperAdmin) return true;
+    if (isLimitedAdmin) return user.role !== 'admin' && user.role !== 'superadmin';
+    if (isAdmin) return user.role !== 'superadmin';
     if (isGestor) return user.role === 'operador';
     return false;
   };
 
   const canDeleteUser = (user: AdminUser): boolean => {
+    if (isSuperAdmin) return user.id !== currentUserId;
     if (!isAdmin) return false;
+    if (user.role === 'superadmin') return false;
     if (isLimitedAdmin && user.role === 'admin') return false;
     return user.id !== currentUserId;
   };
@@ -163,7 +173,8 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
     if ((editForm.department || '').trim().length < 2) return 'Setor obrigatório.';
     if (!isPhoneValid(editForm.phone || '')) return 'Telefone inválido. Use DDD + número.';
     if (isGestor && editForm.role !== 'operador') return 'Gestor não pode promover perfil acima de operador.';
-    if (isLimitedAdmin && editForm.role === 'admin') return 'Secretário não pode promover usuário para admin.';
+    if (!isSuperAdmin && editForm.role === 'superadmin') return 'Apenas o ADMIN pode promover usuário para ADMIN.';
+    if (isLimitedAdmin && (editForm.role === 'admin' || editForm.role === 'superadmin')) return 'Secretário não pode promover usuário para perfil administrativo.';
     return null;
   };
 
@@ -173,7 +184,8 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
     setInfo('');
 
     if (!isPhoneValid(createForm.phone || '')) return setError('Telefone inválido. Use DDD + número.');
-    if (isLimitedAdmin && createForm.role === 'admin') return setError('Secretário não pode criar usuários admin.');
+    if (!isSuperAdmin && createForm.role === 'superadmin') return setError('Apenas o ADMIN pode criar outro ADMIN.');
+    if (isLimitedAdmin && (createForm.role === 'admin' || createForm.role === 'superadmin')) return setError('Secretário não pode criar usuários administrativos.');
     if (isGestor && createForm.role !== 'operador') return setError('Gestor só pode criar usuário operador.');
     if (!passwordStrong) return setError('A senha não atende aos critérios de segurança.');
 
@@ -223,6 +235,18 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
       setInfo('Usuário ativado com sucesso.');
     } catch (err: any) {
       setError(err?.message || 'Não foi possível ativar o usuário.');
+    }
+  };
+
+  const handleUnlock = async (userId: string) => {
+    setError('');
+    setInfo('');
+    try {
+      await userAdminService.unlock(userId);
+      await loadUsers();
+      setInfo('Conta desbloqueada com sucesso.');
+    } catch (err: any) {
+      setError(err?.message || 'Não foi possível desbloquear a conta.');
     }
   };
 
@@ -311,6 +335,7 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
             <option value="operador">Operador</option>
             {!isGestor && <option value="gestor">Gestor</option>}
             {!isGestor && !isLimitedAdmin && <option value="admin">Admin</option>}
+            {isSuperAdmin && <option value="superadmin">ADMIN</option>}
           </select>
           <input className={inputClass} placeholder="Telefone (DDD + número)" value={createForm.phone || ''} onChange={(e) => setCreateForm({ ...createForm, phone: formatPhone(e.target.value) })} />
 
@@ -338,6 +363,7 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
             <option value="operador">Operador</option>
             <option value="gestor">Gestor</option>
             <option value="admin">Admin</option>
+            <option value="superadmin">ADMIN</option>
           </select>
           <input className={inputClass} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar nome ou e-mail" />
           <button onClick={() => setSearch('')} className="rounded-xl border border-green-300 px-3 py-2 text-sm font-bold">Limpar busca</button>
@@ -356,6 +382,7 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
                   <th className="py-3">E-mail</th>
                   <th className="py-3">Perfil</th>
                   <th className="py-3">Setor</th>
+                  {isSuperAdmin && <th className="py-3">Aprovado por</th>}
                   <th className="py-3">Status</th>
                   <th className="py-3">Ações</th>
                 </tr>
@@ -364,22 +391,36 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
                 {filteredUsers.map((u) => {
                   const canManage = canManageUser(u);
                   const canDelete = canDeleteUser(u);
+                  const locked = isUserLocked(u);
                   return (
                     <tr key={u.id} className="border-b border-green-900/10 align-top">
                       <td className="py-3 font-bold">{u.fullName}</td>
                       <td className="py-3">{u.email}</td>
                       <td className="py-3">{roleLabel[u.role]}</td>
                       <td className="py-3">{u.department}</td>
+                      {isSuperAdmin && <td className="py-3">{u.approvedByName || '-'}</td>}
                       <td className="py-3">
                         <span className={`rounded-lg px-2 py-1 text-xs font-bold ${u.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
                           {u.isActive ? 'Ativo' : 'Inativo'}
                         </span>
                         {!u.approvedAt && <span className="ml-2 rounded-lg bg-amber-100 px-2 py-1 text-xs font-bold text-amber-800">Pendente</span>}
+                        {locked && (
+                          <span className="ml-2 rounded-lg bg-red-100 px-2 py-1 text-xs font-bold text-red-800">
+                            Bloqueado
+                          </span>
+                        )}
+                        {locked && <div className="mt-1 text-[11px] opacity-70">Até {new Date(String(u.lockedUntil)).toLocaleString('pt-BR')}</div>}
                       </td>
                       <td className="py-3">
                         <div className="flex flex-wrap items-center gap-2">
                           {canManage && <button onClick={() => openEditModal(u)} className="rounded-lg bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-200">Editar</button>}
                           {!u.approvedAt && canManage && <button onClick={() => handleApprove(u.id)} className="rounded-lg bg-blue-100 px-3 py-1 text-xs font-bold text-blue-800 hover:bg-blue-200">Aprovar</button>}
+                          {locked && canManage && (
+                            <button onClick={() => handleUnlock(u.id)} className="inline-flex items-center gap-1 rounded-lg bg-indigo-100 px-3 py-1 text-xs font-bold text-indigo-800 hover:bg-indigo-200">
+                              <FiUnlock size={12} />
+                              Desbloquear
+                            </button>
+                          )}
                           {u.isActive && canManage && <button onClick={() => setUserToDeactivate(u)} className="rounded-lg bg-red-100 px-3 py-1 text-xs font-bold text-red-800 hover:bg-red-200">Desativar</button>}
                           {!u.isActive && canManage && <button onClick={() => handleActivate(u.id)} className="rounded-lg bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-200">Ativar</button>}
                         </div>
@@ -431,6 +472,7 @@ const AdminUsersPanel: React.FC<AdminUsersPanelProps> = ({ darkMode, currentUser
               <option value="operador">Operador</option>
               {!isGestor && <option value="gestor">Gestor</option>}
               {!isGestor && !isLimitedAdmin && <option value="admin">Admin</option>}
+              {isSuperAdmin && <option value="superadmin">ADMIN</option>}
             </select>
           </div>
           <div className="md:col-span-2 mt-2 flex justify-end gap-2">

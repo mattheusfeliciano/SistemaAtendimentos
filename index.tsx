@@ -6,6 +6,8 @@ import App from './App';
 import ProtectedRoute from './components/ProtectedRoute';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
+import TermsOfUsePage from './pages/TermsOfUsePage';
+import PrivacyPolicyPage from './pages/PrivacyPolicyPage';
 import './index.css';
 
 const rootElement = document.getElementById('root');
@@ -21,6 +23,8 @@ root.render(
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/termos-de-uso" element={<TermsOfUsePage />} />
+        <Route path="/politica-de-privacidade" element={<PrivacyPolicyPage />} />
         <Route
           path="/dashboard"
           element={

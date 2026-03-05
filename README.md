@@ -10,7 +10,7 @@ Arquitetura atual:
 - backend em Node.js + Express
 - banco PostgreSQL
 - autenticacao por sessao com cookie HttpOnly
-- controle de permissao por perfil (`admin`, `gestor`, `operador`)
+- controle de permissao por perfil (`superadmin`, `admin`, `gestor`, `operador`)
 
 ## Funcionalidades principais
 
@@ -100,6 +100,8 @@ Backend:
 - `SESSION_HOURS`
 - `ENFORCE_HTTPS`
 - `TRUST_PROXY`
+- `TERMS_VERSION`
+- `PRIVACY_VERSION`
 - `DATABASE_URL` ou (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`)
 - `PGSSLMODE=require` (opcional)
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` (opcional)
@@ -108,6 +110,10 @@ Backend:
 - `COMMENT_CRYPTO_ROTATION_DAYS` (padrao `30`)
 - `COMMENT_CRYPTO_RETENTION_DAYS` (padrao `120`)
 - `COMMENT_CRYPTO_MAINTENANCE_MS` (padrao `21600000`, 6h)
+- `ROOT_ADMIN_FULL_NAME` (padrao `ADMIN`)
+- `ROOT_ADMIN_EMAIL` (padrao `admin@sect.local`)
+- `ROOT_ADMIN_PASSWORD` (obrigatorio alterar em producao)
+- `ROOT_ADMIN_DEPARTMENT` (padrao `Tecnologia da Informacao`)
 
 Frontend:
 
@@ -189,6 +195,12 @@ Para executar E2E localmente na primeira vez:
 - gestao completa de usuarios e permissoes
 - painel do secretario com controle total
 
+### ADMIN (superadmin)
+
+- privilegios totais em todo o sistema
+- pode criar/editar/remover perfis administrativos (`admin` e `superadmin`)
+- conta raiz inicializada automaticamente via variaveis `ROOT_ADMIN_*`
+
 ## Endpoints principais
 
 Autenticacao:
@@ -197,6 +209,9 @@ Autenticacao:
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
+
+Observação:
+- Login e cadastro exigem aceite explícito dos Termos de Uso e da Política de Privacidade.
 
 Usuarios:
 
@@ -255,7 +270,7 @@ Notificacoes:
 
 Operacao/observabilidade:
 
-- `GET /api/ops/metrics` (admin)
+- `GET /api/ops/metrics` (admin/superadmin)
 
 ## Plano de evolucao (guia de proximos passos)
 Status de implementacao continua:

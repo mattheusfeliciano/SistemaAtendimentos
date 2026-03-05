@@ -8,6 +8,13 @@ const csrfGuardHeaders = {
   'x-csrf-guard': '1',
 };
 
+function resolveApiUrl(url: string): string {
+  const raw = String(url || '').trim();
+  if (!raw) return raw;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `${API_BASE_URL}${raw}`;
+}
+
 export class ApiError extends Error {
   status: number;
   code?: string;
@@ -23,7 +30,7 @@ export interface AuthUser {
   id: string;
   fullName: string;
   email: string;
-  role: 'admin' | 'gestor' | 'operador';
+  role: 'superadmin' | 'admin' | 'gestor' | 'operador';
   department: string;
   phone?: string | null;
   emailVerifiedAt?: string | null;
@@ -36,6 +43,8 @@ export interface RegisterPayload {
   password: string;
   department: string;
   phone?: string;
+  termsAccepted: boolean;
+  privacyAccepted: boolean;
 }
 
 export interface RegisterResponse {
@@ -47,13 +56,16 @@ export interface AdminUser {
   id: string;
   fullName: string;
   email: string;
-  role: 'admin' | 'gestor' | 'operador';
+  role: 'superadmin' | 'admin' | 'gestor' | 'operador';
   department: string;
   phone?: string | null;
   isActive: boolean;
   emailVerifiedAt?: string | null;
   approvedAt?: string | null;
   approvedBy?: string | null;
+  approvedByName?: string | null;
+  failedLoginAttempts?: number;
+  lockedUntil?: string | null;
   createdAt: string;
 }
 
@@ -62,12 +74,12 @@ export interface CreateUserPayload {
   email: string;
   password: string;
   department: string;
-  role: 'admin' | 'gestor' | 'operador';
+  role: 'superadmin' | 'admin' | 'gestor' | 'operador';
   phone?: string;
 }
 
 export interface UpdateUserAccessPayload {
-  role: 'admin' | 'gestor' | 'operador';
+  role: 'superadmin' | 'admin' | 'gestor' | 'operador';
 }
 
 export interface UpdateUserPayload {
@@ -75,7 +87,7 @@ export interface UpdateUserPayload {
   email?: string;
   department?: string;
   phone?: string;
-  role?: 'admin' | 'gestor' | 'operador';
+  role?: 'superadmin' | 'admin' | 'gestor' | 'operador';
 }
 
 export type CatalogOptionType = 'departamento' | 'local' | 'atividade' | 'responsavel';
@@ -302,7 +314,7 @@ export const authService = {
     return data.user;
   },
 
-  async login(email: string, password: string): Promise<AuthUser> {
+  async login(email: string, password: string, termsAccepted: boolean, privacyAccepted: boolean): Promise<AuthUser> {
     const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
       ...defaultFetchOptions,
       method: 'POST',
@@ -310,7 +322,7 @@ export const authService = {
         ...csrfGuardHeaders,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, termsAccepted, privacyAccepted }),
     });
     const data = await handleResponse<{ user: AuthUser }>(response);
     return data.user;
@@ -378,6 +390,15 @@ export const userAdminService = {
 
   async activate(userId: string): Promise<AdminUser> {
     const response = await fetch(`${API_BASE_URL}/api/users/${userId}/activate`, {
+      ...defaultFetchOptions,
+      method: 'PATCH',
+      headers: csrfGuardHeaders,
+    });
+    return handleResponse<AdminUser>(response);
+  },
+
+  async unlock(userId: string): Promise<AdminUser> {
+    const response = await fetch(`${API_BASE_URL}/api/users/${userId}/unlock`, {
       ...defaultFetchOptions,
       method: 'PATCH',
       headers: csrfGuardHeaders,
@@ -645,7 +666,8 @@ export const taskService = {
 
   async listAttachments(taskId: string): Promise<TaskAttachment[]> {
     const response = await fetch(`${API_BASE_URL}/api/tasks/${taskId}/attachments`, defaultFetchOptions);
-    return handleResponse<TaskAttachment[]>(response);
+    const attachments = await handleResponse<TaskAttachment[]>(response);
+    return attachments.map((attachment) => ({ ...attachment, url: resolveApiUrl(attachment.url) }));
   },
 
   async addAttachment(taskId: string, payload: { title: string; url: string }): Promise<{ id: string }> {
@@ -671,7 +693,8 @@ export const taskService = {
       headers: csrfGuardHeaders,
       body: formData,
     });
-    return handleResponse<{ id: string; url: string }>(response);
+    const payload = await handleResponse<{ id: string; url: string }>(response);
+    return { ...payload, url: resolveApiUrl(payload.url) };
   },
 
   async setTyping(taskId: string, typing: boolean): Promise<{ ok: boolean }> {

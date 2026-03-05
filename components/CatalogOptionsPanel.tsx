@@ -7,6 +7,7 @@ import ModalDialog from './ui/ModalDialog';
 interface CatalogOptionsPanelProps {
   darkMode: boolean;
   currentUserRole?: AuthUser['role'];
+  initialType?: CatalogOptionType;
 }
 
 const optionTypeLabel: Record<CatalogOptionType, string> = {
@@ -43,7 +44,7 @@ const splitBatchValues = (rawValue: string): string[] => {
   return unique;
 };
 
-const CatalogOptionsPanel: React.FC<CatalogOptionsPanelProps> = ({ darkMode, currentUserRole }) => {
+const CatalogOptionsPanel: React.FC<CatalogOptionsPanelProps> = ({ darkMode, currentUserRole, initialType }) => {
   const [options, setOptions] = useState<CatalogOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -61,7 +62,7 @@ const CatalogOptionsPanel: React.FC<CatalogOptionsPanelProps> = ({ darkMode, cur
   const inputClass = darkMode
     ? 'w-full rounded-xl border border-[#1E4D36] bg-[#0B2016] text-white px-4 py-3 outline-none focus:ring-2 focus:ring-[#1E8449]'
     : 'w-full rounded-xl border border-green-200 bg-green-50 px-4 py-3 outline-none focus:ring-2 focus:ring-[#1E8449]';
-  const canDelete = currentUserRole === 'admin' || currentUserRole === 'gestor';
+  const canDelete = currentUserRole === 'superadmin' || currentUserRole === 'admin' || currentUserRole === 'gestor';
 
   const loadOptions = async () => {
     try {
@@ -79,6 +80,11 @@ const CatalogOptionsPanel: React.FC<CatalogOptionsPanelProps> = ({ darkMode, cur
   useEffect(() => {
     loadOptions();
   }, []);
+
+  useEffect(() => {
+    if (!initialType) return;
+    setType(initialType);
+  }, [initialType]);
 
   const grouped = useMemo(
     () => ({

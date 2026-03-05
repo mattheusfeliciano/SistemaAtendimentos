@@ -42,6 +42,14 @@ const SECRETARY_DISPLAY_NAME = 'SECRETÁRIO';
 type AppTab = 'dashboard' | 'registrar' | 'historico' | 'usuarios' | 'padronizacao' | 'relatorios' | 'atividades' | 'equipe' | 'secretaria' | 'configuracoes';
 type GlobalSearchItemKind = 'atendimento' | 'atividade' | 'equipe' | 'usuario' | 'notificacao';
 type GlobalSearchItem = { id: string; kind: GlobalSearchItemKind; title: string; subtitle: string };
+const emptyAtendimentoDraft: Omit<Atendimento, 'id' | 'createdAt'> = {
+  data: '',
+  turno: Turno.MANHA,
+  departamento: '',
+  atividade: '',
+  responsavel: '',
+  local: '',
+};
 
 function splitCompositeValues(value: string): string[] {
   return String(value || '')
@@ -86,6 +94,8 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const [registerWorkspace, setRegisterWorkspace] = useState<'' | 'atendimento' | 'departamento' | 'local' | 'atividade' | 'responsavel'>('');
+  const [registerDraft, setRegisterDraft] = useState<Omit<Atendimento, 'id' | 'createdAt'>>(emptyAtendimentoDraft);
   const [globalSearchData, setGlobalSearchData] = useState<GlobalSearchItem[]>([]);
   const lastUnreadCountRef = useRef<number | null>(null);
   const notificationsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -128,7 +138,7 @@ const App: React.FC = () => {
         : undefined,
     [editingAtendimento]
   );
-  const canManageUsers = currentUser?.role === 'admin' || currentUser?.role === 'gestor';
+  const canManageUsers = currentUser?.role === 'superadmin' || currentUser?.role === 'admin' || currentUser?.role === 'gestor';
 
   const fetchData = useCallback(async () => {
     try {
@@ -259,14 +269,16 @@ const App: React.FC = () => {
   }, [globalSearchData, globalSearchQuery]);
 
   const canCreateAtendimento = !!currentUser;
-  const canDeleteAtendimento = currentUser?.role === 'admin' || currentUser?.role === 'gestor';
+  const canDeleteAtendimento = currentUser?.role === 'superadmin' || currentUser?.role === 'admin' || currentUser?.role === 'gestor';
   const canEditAtendimento = !!currentUser;
   const canManageCatalog = !!currentUser;
   const isSecretaryUser = normalizeComparable(currentUser?.fullName || '') === normalizeComparable(SECRETARY_DISPLAY_NAME);
-  const canManageSecretary = !!currentUser && (isSecretaryUser || currentUser.role === 'admin');
+  const canManageSecretary = !!currentUser && (isSecretaryUser || currentUser.role === 'superadmin' || currentUser.role === 'admin');
   const currentRoleLabel =
     isSecretaryUser
       ? 'Secretário'
+      : currentUser?.role === 'superadmin'
+      ? 'ADMIN'
       : currentUser?.role === 'admin'
       ? 'Admin'
       : currentUser?.role === 'gestor'
@@ -292,10 +304,18 @@ const App: React.FC = () => {
         'Acompanhar atividades e definir prazos.',
       ];
     }
+    if (currentUser?.role === 'superadmin') {
+      return [
+        'Controle total da plataforma.',
+        'Gerenciar perfis ADMIN, Admin, Gestor e Operador.',
+        'Aprovar, ativar, desativar e excluir qualquer usuário.',
+        'Acesso completo a todos os painéis e métricas.',
+      ];
+    }
     if (currentUser?.role === 'admin') {
       return [
-        'Acesso total do sistema.',
-        'Gerenciar usuários, permissões e exclusões.',
+        'Acesso administrativo avançado do sistema.',
+        'Gerenciar usuários, permissões e exclusões (exceto ADMIN).',
         'Acompanhar histórico, dashboard e relatórios.',
         'Acesso ao painel do secretário para coordenação e melhorias administrativas.',
       ];
@@ -342,13 +362,19 @@ const App: React.FC = () => {
   }, [atendimentos, atividades]);
 
   useEffect(() => {
+    if (activeTab === 'padronizacao') {
+      if (canManageCatalog) {
+        setRegisterWorkspace('departamento');
+        setActiveTab('registrar');
+      } else {
+        setActiveTab('dashboard');
+      }
+      return;
+    }
     if (activeTab === 'usuarios' && !canManageUsers) {
       setActiveTab('dashboard');
     }
     if (activeTab === 'registrar' && !canCreateAtendimento) {
-      setActiveTab('dashboard');
-    }
-    if (activeTab === 'padronizacao' && !canManageCatalog) {
       setActiveTab('dashboard');
     }
     if (activeTab === 'relatorios' && !currentUser) {
@@ -596,6 +622,7 @@ const App: React.FC = () => {
       return;
     }
     await atendimentoService.create(data);
+    setRegisterDraft(emptyAtendimentoDraft);
     await fetchData();
     setSuccessNotice('Atendimento registrado com sucesso.');
     window.setTimeout(() => setSuccessNotice(''), 3500);
@@ -892,7 +919,6 @@ const App: React.FC = () => {
     { key: 'equipe' as AppTab, label: 'Equipe', icon: FiUsers, visible: canManageSecretary },
     { key: 'secretaria' as AppTab, label: 'Painel da Secretaria', icon: FiCheckSquare, visible: canManageSecretary },
     { key: 'usuarios' as AppTab, label: 'Usuários', icon: FiUserCheck, visible: canManageUsers },
-    { key: 'padronizacao' as AppTab, label: 'Padronização', icon: FiSliders, visible: canManageCatalog },
     { key: 'relatorios' as AppTab, label: 'Relatórios', icon: FiFileText, visible: !!currentUser },
     { key: 'configuracoes' as AppTab, label: 'Configurações', icon: FiSettings, visible: !!currentUser },
   ].filter((item) => item.visible);
@@ -991,7 +1017,7 @@ const App: React.FC = () => {
                   {activeTab === 'dashboard'
                     ? 'Dashboard de Atendimentos/Atividades'
                     : activeTab === 'registrar'
-                      ? 'Novo Registro'
+                      ? 'Cadastro e Padronização'
                       : activeTab === 'historico'
                         ? 'Histórico de Atendimentos'
                         : activeTab === 'atividades'
@@ -1135,8 +1161,57 @@ const App: React.FC = () => {
         <div className={`flex-1 p-3 sm:p-6 lg:p-8 ${isFullScreen ? 'max-w-full' : 'max-w-[1600px] mx-auto w-full'} pb-24`}>
           
           {activeTab === 'registrar' && !isFullScreen && canCreateAtendimento && (
-            <div className="max-w-3xl mx-auto py-2 sm:py-6">
-              <AtendimentoForm onSave={handleSaveAtendimento} onClose={() => setActiveTab('dashboard')} isStandalone={true} darkMode={darkMode} />
+            <div className="max-w-6xl mx-auto py-2 sm:py-6 space-y-6">
+              <section className={`p-6 rounded-3xl border shadow-xl ${darkMode ? 'bg-[#122D21] border-[#1E4D36] text-white' : 'bg-white border-green-100 text-[#0F5132]'}`}>
+                <h3 className="text-2xl font-black mb-2">Seleção de Cadastro</h3>
+                <p className="text-sm font-semibold opacity-80 mb-4">
+                  Use um único lugar para registrar atendimento e padronizar opções oficiais.
+                </p>
+                <div className="max-w-xl">
+                  <div className="relative">
+                    <FiSliders className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-[#1E8449]" />
+                    <select
+                      value={registerWorkspace}
+                      onChange={(event) => setRegisterWorkspace(event.target.value as typeof registerWorkspace)}
+                      className={`w-full rounded-xl border px-4 py-3 pl-10 font-black uppercase tracking-wider outline-none focus:ring-2 focus:ring-[#1E8449] ${
+                        darkMode
+                          ? 'border-[#1E4D36] bg-[#0B2016] text-white'
+                          : 'border-green-200 bg-green-50 text-[#0F5132]'
+                      }`}
+                    >
+                      <option value="">Selecionar</option>
+                      <option value="atendimento">Cadastrar Atendimento/Atividade</option>
+                      <option value="departamento">Departamento</option>
+                      <option value="local">Locais</option>
+                      <option value="atividade">Atividades</option>
+                      <option value="responsavel">Responsáveis</option>
+                    </select>
+                  </div>
+                </div>
+              </section>
+
+              {registerWorkspace === 'atendimento' ? (
+                <div className="max-w-3xl mx-auto">
+                  <AtendimentoForm
+                    onSave={handleSaveAtendimento}
+                    onClose={() => setActiveTab('dashboard')}
+                    isStandalone={true}
+                    darkMode={darkMode}
+                    initialData={registerDraft}
+                    onDraftChange={setRegisterDraft}
+                  />
+                </div>
+              ) : registerWorkspace ? (
+                <CatalogOptionsPanel
+                  darkMode={darkMode}
+                  currentUserRole={currentUser?.role}
+                  initialType={registerWorkspace}
+                />
+              ) : (
+                <div className={`rounded-3xl border p-8 text-center font-semibold ${darkMode ? 'border-[#1E4D36] bg-[#122D21] text-green-100' : 'border-green-100 bg-white text-[#0F5132]'}`}>
+                  Selecione uma opção acima para continuar.
+                </div>
+              )}
             </div>
           )}
 
@@ -1447,9 +1522,6 @@ const App: React.FC = () => {
 
           {activeTab === 'usuarios' && !isFullScreen && canManageUsers && (
             <AdminUsersPanel darkMode={darkMode} currentUserRole={currentUser?.role} currentUserId={currentUser?.id} isSecretaryUser={isSecretaryUser} />
-          )}
-          {activeTab === 'padronizacao' && !isFullScreen && canManageCatalog && (
-            <CatalogOptionsPanel darkMode={darkMode} currentUserRole={currentUser?.role} />
           )}
           {activeTab === 'configuracoes' && !isFullScreen && currentUser && (
             <SettingsScreen darkMode={darkMode} currentUser={currentUser} onToggleDarkMode={setDarkMode} />

@@ -103,7 +103,7 @@ const TasksPanel: React.FC<TasksPanelProps> = ({ darkMode, currentUser, isSecret
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [alert, setAlert] = useState<{ kind: 'success' | 'error' | 'warning' | 'info'; message: string } | null>(null);
 
-  const canSeeDelegated = isSecretaryUser || currentUser.role === 'gestor' || currentUser.role === 'admin';
+  const canSeeDelegated = isSecretaryUser || currentUser.role === 'gestor' || currentUser.role === 'admin' || currentUser.role === 'superadmin';
 
   const myTasks = useMemo(
     () => tasks.filter((task) => task.assignees.some((assignee) => assignee.id === currentUser.id)),

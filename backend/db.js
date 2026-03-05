@@ -70,6 +70,8 @@ export async function initDatabase() {
       email_verified_at TIMESTAMPTZ,
       approved_at TIMESTAMPTZ,
       approved_by UUID,
+      failed_login_attempts INT NOT NULL DEFAULT 0,
+      locked_until TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
@@ -82,14 +84,21 @@ export async function initDatabase() {
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;`);
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_by UUID;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INT NOT NULL DEFAULT 0;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMPTZ;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version TEXT;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_version TEXT;`);
 
   await query(`
     UPDATE users
     SET
       full_name = COALESCE(NULLIF(full_name, ''), name),
       role = COALESCE(NULLIF(role, ''), 'operador'),
-      department = COALESCE(department, '')
-    WHERE full_name IS NULL OR full_name = '' OR role IS NULL OR role = '' OR department IS NULL;
+      department = COALESCE(department, ''),
+      failed_login_attempts = COALESCE(failed_login_attempts, 0)
+    WHERE full_name IS NULL OR full_name = '' OR role IS NULL OR role = '' OR department IS NULL OR failed_login_attempts IS NULL;
   `);
 
   await query(`
@@ -110,11 +119,13 @@ export async function initDatabase() {
       token_hash TEXT NOT NULL,
       ip_address TEXT,
       user_agent TEXT,
+      last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       expires_at TIMESTAMPTZ NOT NULL,
       revoked_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await query(`ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS audit_logs (
