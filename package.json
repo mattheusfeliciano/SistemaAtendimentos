@@ -1,0 +1,51 @@
+{
+  "name": "atendimentos-dash-pro",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "api": "node backend/server.js",
+    "dev:full": "concurrently \"npm run api\" \"npm run dev\"",
+    "test:authz": "node --test backend/authz.test.js",
+    "test:e2e": "playwright test",
+    "backup:db": "powershell -ExecutionPolicy Bypass -File scripts/backup-db.ps1",
+    "restore:db": "powershell -ExecutionPolicy Bypass -File scripts/restore-db.ps1",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "docker:down:purge": "docker compose down -v",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "^1.40.0",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "16.6.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.1",
+    "pg": "^8.16.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-icons": "^5.6.0",
+    "react-router-dom": "^7.13.1",
+    "recharts": "^3.7.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@tailwindcss/postcss": "^4.2.1",
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.1.2",
+    "postcss": "^8.5.8",
+    "tailwindcss": "4.2.1",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

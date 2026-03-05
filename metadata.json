@@ -1,0 +1,8 @@
+{
+  "name": "Atendimentos Dash Pro",
+  "description": "Dashboard profissional de atendimentos em tempo real com suporte a modo TV, gráficos dinâmicos e insights gerados por IA via Gemini.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
